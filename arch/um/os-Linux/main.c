@@ -21,8 +21,6 @@
 
 #define STACKSIZE (8 * 1024 * 1024)
 
-long elf_aux_hwcap;
-
 static void __init set_stklim(void)
 {
 	struct rlimit lim;
