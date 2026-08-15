@@ -19,6 +19,19 @@ struct mm_id {
 	int syscall_fd_map[STUB_MAX_FDS];
 };
 
+/*
+ * Sparse's lock annotations, normally from <linux/compiler_types.h>. This
+ * header is reached by USER_CFLAGS objects too, and a sysroot that ships its
+ * own linux/compiler_types.h shadows the kernel's -- the Android NDK does.
+ * Without these the declarations below parse as function definitions.
+ */
+#ifndef __acquires
+#define __acquires(x)
+#endif
+#ifndef __releases
+#define __releases(x)
+#endif
+
 void notify_mm_kill(int pid);
 
 #endif
