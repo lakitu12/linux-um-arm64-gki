@@ -16,6 +16,10 @@
 #include "internal.h"
 #include <linux/swab.h>
 
+#ifndef AT_MINSIGSTKSZ
+#define AT_MINSIGSTKSZ 51
+#endif
+
 #if __BITS_PER_LONG == 64
 typedef Elf64_auxv_t elf_auxv_t;
 #else
@@ -32,15 +36,6 @@ long elf_aux_hwcap;
  */
 long elf_aux_hwcap2;
 
-/*
- * The host-vDSO passthrough was x86-only; the x86 subarch's headers still
- * reference these symbols, but nothing sets them any more (mirrors upstream
- * 70d52694b6 "x86/um: Do not inherit vDSO from host").
- */
-unsigned long vsyscall_ehdr;
-unsigned long vsyscall_end;
-unsigned long __kernel_vsyscall;
-
 __init void scan_elf_aux( char **envp)
 {
 	elf_auxv_t * auxv;
@@ -55,6 +50,9 @@ __init void scan_elf_aux( char **envp)
 			case AT_HWCAP2:
 				elf_aux_hwcap2 = auxv->a_un.a_val;
 				break;
+			case AT_MINSIGSTKSZ:
+				elf_aux_min_sigstack = auxv->a_un.a_val;
+				break;
 			case AT_PLATFORM:
                                 /* elf.h removed the pointer elements from
                                  * a_un, so we have to use a_val, which is
@@ -66,3 +64,12 @@ __init void scan_elf_aux( char **envp)
 		}
 	}
 }
+
+/*
+ * The host-vDSO passthrough was x86-only; the x86 subarch's headers still
+ * reference these symbols, but nothing sets them any more (mirrors upstream
+ * 70d52694b6 "x86/um: Do not inherit vDSO from host").
+ */
+unsigned long vsyscall_ehdr;
+unsigned long vsyscall_end;
+unsigned long __kernel_vsyscall;
