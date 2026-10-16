@@ -40,9 +40,9 @@ void ptrace_disable(struct task_struct *child)
 long arch_ptrace(struct task_struct *child, long request,
 		 unsigned long addr, unsigned long data)
 {
-	int i, ret;
+	int i __maybe_unused, ret;
 	unsigned long __user *p = (void __user *)data;
-	void __user *vp = p;
+	void __user *vp __maybe_unused = p;
 
 	switch (request) {
 	/* read the word at location addr in the USER area. */
