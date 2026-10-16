@@ -120,7 +120,9 @@ jobs:
           mv /tmp/ndk-x/android-ndk-${NDK_VER}/* /home/runner/android-ndk/
           rm -rf /tmp/ndk.zip /tmp/ndk-x
           test -x /home/runner/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/clang
-          /home/runner/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/clang --version | head -1
+          # No pipe here on purpose: `| head -1` would race -o pipefail the
+          # same way the nm assert did (tool exits on EPIPE, pipeline fails).
+          /home/runner/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/clang --version
         shell: bash
 
       - name: Build bionic kernel
@@ -149,13 +151,24 @@ jobs:
             esac
             echo "config ok: $k"
           done
-          # Symbols the late fixes/backports brought in must be in the image:
+          # Symbols the late fixes/backports brought in must be in the image.
+          # Write the nm output to a file first, then grep the file: piping
+          # llvm-nm into `grep -q` exits grep at its first match, llvm-nm's
+          # next write hits EPIPE and exits 74, and under -o pipefail the
+          # pipeline reports 74 — a symbol that just matched reads as
+          # missing. One red run proved exactly that (nm=74 grep=0).
           NM=/home/runner/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm
+          "$NM" artifacts/linux-bionic > nm-full.txt || { echo "llvm-nm failed (rc=$?)"; exit 1; }
+          echo "nm: $(wc -l < nm-full.txt) lines"
+          file artifacts/linux-bionic
           for s in os_futex_wake elf_aux_min_sigstack elf_aux_hwcap2 apply_alternatives; do
-            "$NM" artifacts/linux-bionic | grep -qE " $s\$" || { echo "missing symbol: $s"; exit 1; }
+            grep -qE " $s$" nm-full.txt || {
+              echo "missing symbol: $s — near matches:"
+              grep -a "$s" nm-full.txt | head -8 || true
+              exit 1
+            }
             echo "symbol ok: $s"
           done
-          file artifacts/linux-bionic
         shell: bash
 
       - name: Collect artifacts
@@ -181,16 +194,22 @@ jobs:
             gki-tip.txt
           if-no-files-found: error
 
-      - name: Upload apply report (on failure)
-        # A red run is the monthly-drift deliverable: it must carry the
-        # conflict report as an artifact, not only in the step log.
+      - name: Upload failure evidence (on failure)
+        # A red run must carry its evidence: the apply report for a GKI
+        # drift, plus the kernel, nm dump, build log and .config when the
+        # failure is further down, so no re-run is needed to diagnose it.
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: um-gki618-apply-report-${{ github.run_number }}
+          name: um-gki618-failure-${{ github.run_number }}
           path: |
             apply-report/
             gki-tip.txt
+            nm-full.txt
+            artifacts/linux-bionic
+            artifacts/stub_exe_bionic
+            artifacts/build-bionic-*.log
+            ${{ runner.temp }}/um-gki618-build/.config
           if-no-files-found: warn
 
   boot:
