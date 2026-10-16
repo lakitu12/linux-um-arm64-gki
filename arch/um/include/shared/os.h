@@ -214,6 +214,9 @@ extern int can_drop_memory(void);
 
 void os_set_pdeathsig(void);
 
+int os_futex_wait(void *uaddr, unsigned int val);
+int os_futex_wake(void *uaddr);
+
 /* execvp.c */
 extern int execvp_noalloc(char *buf, const char *file, char *const argv[]);
 /* helper.c */
