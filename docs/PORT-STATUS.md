@@ -12,6 +12,10 @@ _2026-10-16 · 由 Hermes 执行，来源口径见 report/fixlog.md · SMP 相�
   - 内核 banner：`Linux version 6.18.32-g3836ac3a3ef9 (um@arm64)`，clang 19.0.1 (LLD 19.0.1)
 - ✅ 补丁栈 `patches-gki618/` — **60 笔**（49 系列 + 3 android + 8 回移/修复）+ `apply-gki618.sh`
 - 📋 全部修复记录 `report/fixlog.md`（9 轮构建迭代，逐条根因与处置）；构建日志 `artifacts/build-bionic-*.log`
+- ✅ **CI 全链路绿**（2026-10-16）：公开仓 `lakitu12/linux-um-arm64-gki` apply→bionic 构建→**arm64 runner 真引导**
+  （marker `UMARM_GKI618_BOOT_OK` + Power down，verdict PASS；stub 与参考产物逐位相同）——run
+  [38875955444](https://github.com/lakitu12/linux-um-arm64-gki/actions/runs/38875955444)；
+  月度 cron 对分支 tip 自动试套（漂移=带证据包的红 run）
 
 ## 复现
 ```bash

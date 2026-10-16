@@ -45,6 +45,12 @@ work lives in a separate repository).
 - Reference artifacts: `linux-bionic` sha256 `03c3ef3b…a9410c`,
   `stub_exe_bionic` sha256 `83f51f7c…0781fc`. 16K pages by default: runs on
   4K and 16K host kernels alike.
+- CI end-to-end is green: apply → bionic build → **boot gate on a GitHub
+  arm64 runner** (the built kernel boots to userspace, prints the marker
+  and powers down; verdict PASS; the stub is bit-identical to the
+  reference above) — run
+  [38875955444](https://github.com/lakitu12/linux-um-arm64-gki/actions/runs/38875955444),
+  2026-10-16.
 
 ## Credits & license
 
