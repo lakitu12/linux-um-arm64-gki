@@ -1,0 +1,44 @@
+From 0676b7c90d4017c6662ad610b32a047852ab4f26 Mon Sep 17 00:00:00 2001
+From: lakitu12 <1219387824@qq.com>
+Date: Thu, 1 Oct 2026 18:57:02 +0800
+Subject: [PATCH 51/60] hw_random: world-readable misc node to break the
+ prng_seeder boot race
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+With the Android nodename the node now exists, but prng_seeder still fails:
+error 13 (EACCES), not 2. devtmpfs creates a char node with no explicit mode
+as 0600 root:root (drivers/base/devtmpfs.c); on a device ueventd's coldboot
+narrows /dev/hw_random to 0400 prng_seeder, but prng_seeder (early-init) opens
+it as its own uid before that runs. Guest SELinux is not enforcing (init's
+mount selinuxfs fails EINVAL), so this is pure DAC. miscdevice .mode=0444 makes
+the node readable at creation; ueventd still tightens it later. Android branch
+only — um-arm64 keeps vanilla behavior.
+---
+ drivers/char/hw_random/core.c | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/drivers/char/hw_random/core.c b/drivers/char/hw_random/core.c
+index e35c269..2e8e339 100644
+--- a/drivers/char/hw_random/core.c
++++ b/drivers/char/hw_random/core.c
+@@ -342,6 +342,18 @@ static struct miscdevice rng_miscdev = {
+ 	 * um-arm64 branch.
+ 	 */
+ 	.nodename	= "hw_random",
++	/*
++	 * devtmpfs creates a char node with no explicit mode as 0600 root:root
++	 * (drivers/base/devtmpfs.c). On a real device ueventd's coldboot then
++	 * applies the rule `/dev/hw_random 0400 prng_seeder`, but prng_seeder
++	 * (AOSP 12+, started from early-init) opens the node as the
++	 * prng_seeder uid and does not wait for ueventd — so under UML it hits
++	 * EACCES on the 0600 root node and init reboots. Creating it world-
++	 * readable at registration removes the race: hwrng read is not a
++	 * secret, and ueventd narrows it to 0400 prng_seeder once coldboot
++	 * runs, matching the device convention. Android-only branch policy.
++	 */
++	.mode		= 0444,
+ 	.fops		= &rng_chrdev_ops,
+ 	.groups		= rng_dev_groups,
+ };

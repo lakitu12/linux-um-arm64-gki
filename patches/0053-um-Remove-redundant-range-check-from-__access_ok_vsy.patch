@@ -1,0 +1,40 @@
+From 73ff99295a893ca78f71898ebcce7d816b0d9bcc Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=3D=3FUTF-8=3Fq=3FThomas=3D20Wei=3DC3=3D9Fschuh=3F=3D?=
+ <linux@weissschuh.net>
+Date: Tue, 28 Oct 2025 10:15:42 +0100
+Subject: [PATCH 53/60] um: Remove redundant range check from
+ __access_ok_vsyscall()
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The only caller __access_ok() is already doing the same check through
+__addr_range_nowrap().
+
+Remove the redundant check.
+
+Signed-off-by: Thomas Weißschuh <linux@weissschuh.net>
+Link: https://patch.msgid.link/20251028-uml-remove-32bit-pseudo-vdso-v1-7-e930063eff5f@weissschuh.net
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+---
+ arch/um/include/asm/uaccess.h | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+diff --git a/arch/um/include/asm/uaccess.h b/arch/um/include/asm/uaccess.h
+index 1c6e0ae..3770bde 100644
+--- a/arch/um/include/asm/uaccess.h
++++ b/arch/um/include/asm/uaccess.h
+@@ -17,8 +17,7 @@
+ 
+ #define __access_ok_vsyscall(addr, size) \
+ 	  (((unsigned long) (addr) >= FIXADDR_USER_START) && \
+-	  ((unsigned long) (addr) + (size) <= FIXADDR_USER_END) && \
+-	  ((unsigned long) (addr) + (size) >= (unsigned long)(addr)))
++	  ((unsigned long) (addr) + (size) <= FIXADDR_USER_END))
+ 
+ #define __addr_range_nowrap(addr, size) \
+ 	((unsigned long) (addr) <= ((unsigned long) (addr) + (size)))

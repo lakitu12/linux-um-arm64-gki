@@ -1,0 +1,56 @@
+From a6a5e610e4ccb29814be5c3ca1e0264d1da4827c Mon Sep 17 00:00:00 2001
+From: lakitu12 <1219387824@qq.com>
+Date: Thu, 1 Oct 2026 20:01:19 +0800
+Subject: [PATCH 52/60] um: topdown mmap layout + mmap_rnd_bits (Android init's
+ SetMmapRndBits gate)
+
+init queues SetMmapRndBitsAction unconditionally (system/core init.cpp:1056;
+androidboot.selinux=permissive does NOT skip it - verified on device), opens
+/proc/sys/vm/mmap_rnd_bits and InitFatalReboots when the open fails. The node
+is #ifdef CONFIG_HAVE_ARCH_MMAP_RND_BITS in mm/mmap.c, which UML never
+selected because UML's mmap_base was the fixed TASK_UNMAPPED_BASE - no mmap
+ASLR at all. So the node's absence is a real missing feature, not a naming
+convention (contrast the hw_random nodename commit on this branch).
+
+Selecting ARCH_WANT_DEFAULT_TOPDOWN_MMAP_LAYOUT gives UML the generic
+topdown layout: mmap_base = STACK_TOP - gap - arch_mmap_rnd(), i.e. genuine
+mmap ASLR, and exposes mmap_rnd_bits with arm64-39-bit bounds (18/24);
+guest VA depth equals the host's (39-bit on dash: TASK_SIZE 0x7fc0000000).
+Kconfig smoke passes (defconfig+olddefconfig, symbols land as above).
+
+Android-only: um-arm64 (generic) untouched.
+---
+ arch/um/Kconfig | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/arch/um/Kconfig b/arch/um/Kconfig
+index b641b60..fa2870c 100644
+--- a/arch/um/Kconfig
++++ b/arch/um/Kconfig
+@@ -2,9 +2,26 @@
+ 
+ menu "UML-specific options"
+ 
++config ARCH_MMAP_RND_BITS_MIN
++	int
++	default 18
++
++config ARCH_MMAP_RND_BITS_MAX
++	int
++	default 24
++
+ config UML
+ 	bool
+ 	default y
++	# Android userspace requires it, and UML should never have lacked it:
++	# the generic topdown layout gives mmap bases real ASLR (previously
++	# mm->mmap_base was the fixed TASK_UNMAPPED_BASE on this arch), and
++	# /proc/sys/vm/mmap_rnd_bits is what Android init's SetMmapRndBits
++	# action opens and hard-reboots the guest over when absent.
++	# arm64-39-bit-style entropy bounds; UML's guest VA equals the host's
++	# user address space so 24 is the ceiling that fits any phone host.
++	select ARCH_WANT_DEFAULT_TOPDOWN_MMAP_LAYOUT
++	select HAVE_ARCH_MMAP_RND_BITS
+ 	select ARCH_DISABLE_KASAN_INLINE if STATIC_LINK
+ 	select ARCH_NEEDS_DEFER_KASAN if STATIC_LINK
+ 	select ARCH_WANTS_DYNAMIC_TASK_STRUCT

@@ -1,0 +1,66 @@
+From 4bcab50faac2cee1ba36074114e6163ca73447ef Mon Sep 17 00:00:00 2001
+From: lakitu12 <1219387824@qq.com>
+Date: Fri, 16 Oct 2026 13:31:09 +0800
+Subject: [PATCH 59/60] um/arm64: backport os_futex_wait()/os_futex_wake() for
+ the stub handoff
+
+The stub handoff wake in arch/um/kernel/skas/mmu.c (from the port's
+"elide the stub handoff wake" commit) calls os_futex_wake(). The helper
+arrived upstream with the 6.19 SMP batch; the 6.18 base lacks it, so
+take the definition and declaration verbatim from the
+port base (7.2-rc4): process.c definition, os.h declaration.
+os_futex_wait() is added alongside for parity; nothing references it
+yet.
+---
+ arch/um/include/shared/os.h |  3 +++
+ arch/um/os-Linux/process.c  | 19 +++++++++++++++++++
+ 2 files changed, 22 insertions(+)
+
+diff --git a/arch/um/include/shared/os.h b/arch/um/include/shared/os.h
+index 2ccf80a..e8d9be7 100644
+--- a/arch/um/include/shared/os.h
++++ b/arch/um/include/shared/os.h
+@@ -214,6 +214,9 @@ extern int can_drop_memory(void);
+ 
+ void os_set_pdeathsig(void);
+ 
++int os_futex_wait(void *uaddr, unsigned int val);
++int os_futex_wake(void *uaddr);
++
+ /* execvp.c */
+ extern int execvp_noalloc(char *buf, const char *file, char *const argv[]);
+ /* helper.c */
+diff --git a/arch/um/os-Linux/process.c b/arch/um/os-Linux/process.c
+index 00b49e9..10084a3 100644
+--- a/arch/um/os-Linux/process.c
++++ b/arch/um/os-Linux/process.c
+@@ -19,6 +19,7 @@
+ #include <longjmp.h>
+ #include <os.h>
+ #include <skas/skas.h>
++#include <linux/futex.h>
+ 
+ void os_alarm_process(int pid)
+ {
+@@ -189,3 +190,21 @@ void os_set_pdeathsig(void)
+ {
+ 	prctl(PR_SET_PDEATHSIG, SIGKILL);
+ }
++
++int os_futex_wait(void *uaddr, unsigned int val)
++{
++	int r;
++
++	CATCH_EINTR(r = syscall(__NR_futex, uaddr, FUTEX_WAIT, val,
++				NULL, NULL, 0));
++	return r < 0 ? -errno : r;
++}
++
++int os_futex_wake(void *uaddr)
++{
++	int r;
++
++	CATCH_EINTR(r = syscall(__NR_futex, uaddr, FUTEX_WAKE, INT_MAX,
++				NULL, NULL, 0));
++	return r < 0 ? -errno : r;
++}

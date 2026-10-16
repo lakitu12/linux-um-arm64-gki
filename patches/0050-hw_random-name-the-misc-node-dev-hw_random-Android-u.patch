@@ -1,0 +1,46 @@
+From 216329606b1456d8926cf225840862857093aaba Mon Sep 17 00:00:00 2001
+From: lakitu12 <1219387824@qq.com>
+Date: Thu, 1 Oct 2026 18:37:29 +0800
+Subject: [PATCH 50/60] hw_random: name the misc node /dev/hw_random (Android
+ userspace convention)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+prng_seeder (AOSP 12+) opens /dev/hw_random unconditionally from early-init and
+hangs forever when it is absent; init then reboots, and a UML guest cycles at
+~1.5s per boot. Device kernels ship the node under this name (verified on dash:
+/dev/hw_random 10,183 exists, /dev/hwrng does not), and redroid images'
+ueventd.rc rules /dev/hw_random ownership — so devtmpfs naming it hw_random
+lands exactly where the userspace expects it.
+
+Android-only branch policy: um-arm64 stays vanilla ('hwrng') for generic
+guests; um-arm64-android carries this commit for Android guests.
+---
+ drivers/char/hw_random/core.c | 13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/char/hw_random/core.c b/drivers/char/hw_random/core.c
+index 036de72..e35c269 100644
+--- a/drivers/char/hw_random/core.c
++++ b/drivers/char/hw_random/core.c
+@@ -330,7 +330,18 @@ static const struct attribute_group *rng_dev_groups[];
+ static struct miscdevice rng_miscdev = {
+ 	.minor		= HWRNG_MINOR,
+ 	.name		= RNG_MODULE_NAME,
+-	.nodename	= "hwrng",
++	/*
++	 * Android userspace opens the hwrng node as /dev/hw_random, not
++	 * /dev/hwrng: prng_seeder (AOSP 12+, started from early-init) opens
++	 * /dev/hw_random unconditionally and hangs forever — then init
++	 * reboots the box — when it is absent. Device kernels ship the node
++	 * under that name (there is no /dev/hwrng on them), and the image's
++	 * own ueventd.rc rules the node by exactly this path. This branch
++	 * exists to run Android guests, so the devtmpfs/ueventd name follows
++	 * the Android convention. Generic users of /dev/hwrng keep the
++	 * um-arm64 branch.
++	 */
++	.nodename	= "hw_random",
+ 	.fops		= &rng_chrdev_ops,
+ 	.groups		= rng_dev_groups,
+ };

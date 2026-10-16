@@ -1,0 +1,80 @@
+From 2f8f3f7433e7253e678d279255b94488573926fd Mon Sep 17 00:00:00 2001
+From: lakitu12 <1219387824@qq.com>
+Date: Fri, 16 Oct 2026 13:26:22 +0800
+Subject: [PATCH 57/60] um/arm64: overlay text-patching.h with the shared
+ stubs' prototypes
+
+The shared arch/um/kernel/um_arch.c defines no-op text-patching stubs
+(apply_alternatives, the retpoline/return-thunk appliers, text_poke and
+friends). On x86 the subarch headers declare them; on arm64 nothing did
+-- <asm/text-patching.h> resolves to arch/arm64's, which declares only
+the aarch64_insn_* family -- so the definitions fail -Wmissing-prototypes
+with clang versions whose support for the flag passes cc-option (r28c;
+the r27c-based CI predates it).
+
+Add an overlay under arch/arm64/um/asm/ that keeps the aarch64_insn_*
+declarations the reused module code needs and adds the stubs' prototypes.
+---
+ arch/arm64/um/asm/text-patching.h | 53 +++++++++++++++++++++++++++++++
+ 1 file changed, 53 insertions(+)
+ create mode 100644 arch/arm64/um/asm/text-patching.h
+
+diff --git a/arch/arm64/um/asm/text-patching.h b/arch/arm64/um/asm/text-patching.h
+new file mode 100644
+index 0000000..ec193a0
+--- /dev/null
++++ b/arch/arm64/um/asm/text-patching.h
+@@ -0,0 +1,53 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/*
++ * Overlay for arm64's <asm/text-patching.h> in the ARCH=um SUBARCH=arm64
++ * build.
++ *
++ * Two sets of users share this header here:
++ *
++ *  - The reused arm64 module code (patching.c, module.c) needs the
++ *    aarch64_insn_* declarations. They are copied verbatim from
++ *    arch/arm64/include/asm/text-patching.h, which this file shadows
++ *    (arch/arm64/um/asm/ wins over arch/arm64/include/asm/).
++ *
++ *  - The shared arch/um/kernel/um_arch.c defines no-op text-patching
++ *    stubs -- apply_alternatives(), the retpoline/return-thunk appliers,
++ *    text_poke() and friends. On x86 the subarch's alternative.h and
++ *    text-patching.h declare them; on arm64 nothing did, so the
++ *    definitions failed -Wmissing-prototypes with clang versions that
++ *    support the flag. Declare them here.
++ *
++ * struct alt_instr is only needed for the prototype; it is deliberately
++ * not defined here (no ALTERNATIVE sequences exist for this subarch; see
++ * alternative.h).
++ */
++#ifndef __UM_ARM64_TEXT_PATCHING_H
++#define __UM_ARM64_TEXT_PATCHING_H
++
++#include <linux/types.h>
++
++/* Mirrors arch/arm64/include/asm/text-patching.h (which this shadows). */
++int aarch64_insn_read(void *addr, u32 *insnp);
++int aarch64_insn_write(void *addr, u32 insn);
++
++int aarch64_insn_write_literal_u64(void *addr, u64 val);
++void *aarch64_insn_set(void *dst, u32 insn, size_t len);
++void *aarch64_insn_copy(void *dst, void *src, size_t len);
++
++int aarch64_insn_patch_text_nosync(void *addr, u32 insn);
++int aarch64_insn_patch_text(void *addrs[], u32 insns[], int cnt);
++
++/* Prototypes for the no-op stubs in arch/um/kernel/um_arch.c. */
++struct alt_instr;
++
++void apply_seal_endbr(s32 *start, s32 *end);
++void apply_retpolines(s32 *start, s32 *end);
++void apply_returns(s32 *start, s32 *end);
++void apply_fineibt(s32 *start_retpoline, s32 *end_retpoline,
++		   s32 *start_cfi, s32 *end_cfi);
++void apply_alternatives(struct alt_instr *start, struct alt_instr *end);
++void *text_poke(void *addr, const void *opcode, size_t len);
++void *text_poke_copy(void *addr, const void *opcode, size_t len);
++void smp_text_poke_sync_each_cpu(void);
++
++#endif /* __UM_ARM64_TEXT_PATCHING_H */

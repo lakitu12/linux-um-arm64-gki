@@ -1,0 +1,27 @@
+From b8fe51cce9cefd2637296f725e626bdc1a10fbc3 Mon Sep 17 00:00:00 2001
+From: lakitu12 <1219387824@qq.com>
+Date: Fri, 16 Oct 2026 13:19:19 +0800
+Subject: [PATCH 55/60] um/arm64: raise CONFIG_FRAME_WARN to 8192 in
+ arm64_defconfig
+
+The signal setup paths carry ~4.5 KB stack frames with NDK clang r28c
+(setup_signal_stack_si 4512, sys_rt_sigreturn 4464), over the 64-bit
+default 2048, and CONFIG_WERROR turns the warning into a build failure.
+
+The port's user-side objects already carry -Wframe-larger-than=4096;
+raise the kernel-side bound to the Kconfig maximum instead of removing
+the check. Upstream loosened the x86_64 side similarly in 92d5c5c04e
+("um: Remove CONFIG_FRAME_WARN from x86_64_defconfig").
+---
+ arch/um/configs/arm64_defconfig | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/arch/um/configs/arm64_defconfig b/arch/um/configs/arm64_defconfig
+index f06c59f..fc057ef 100644
+--- a/arch/um/configs/arm64_defconfig
++++ b/arch/um/configs/arm64_defconfig
+@@ -87,3 +87,4 @@ CONFIG_TMPFS=y
+ CONFIG_NLS=y
+ CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT=y
+ CONFIG_DEBUG_KERNEL=y
++CONFIG_FRAME_WARN=8192

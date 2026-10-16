@@ -1,0 +1,216 @@
+name: build-um-gki618
+
+# The Android 17 GKI variant of the um-arm64 sandbox kernel: apply the
+# um-arm64 GKI-6.18 patch stack (gki618/patches) onto the Android 17 GKI
+# kernel (kernel/common android17-6.18, Linux 6.18 LTS), build the bionic
+# UML kernel with the NDK, then boot it on an arm64 runner with a marker
+# gate — no device needed for the smoke test.
+#
+# The patch stack is the deliverable of the GKI port: the upstream port
+# series + the Android guest fixes + backports of upstream fixes the 6.18
+# base predates + the build fixes r28c exposed. Every patch keeps its
+# original author/date; the why of each is in gki618/fixlog.md, the
+# validated baseline data (6.18.32, sha256 of artifacts) in
+# gki618/PORT-STATUS.md.
+#
+# The schedule re-tests the stack against the current GKI branch tip, so
+# the next GKI drop that breaks the stack shows up as a red run carrying a
+# conflict report instead of silently rotting.
+#
+# Runner note: this is a public repo, so GitHub-hosted runners --
+# including the arm64 one the boot job uses -- are free. run_boot=false
+# keeps a run artifact-only when needed. NDK pinned to r28c -- the
+# version the port was validated against (upstream used r27c; r28c
+# enables a few extra warning flags, and the stack is fixed up for them).
+
+on:
+  workflow_dispatch:
+    inputs:
+      gki_ref:
+        description: "kernel/common ref (branch or tag), e.g. android17-6.18 or android17-6.18-2026-09_r7"
+        required: false
+        type: string
+        default: "android17-6.18"
+      extra_config:
+        description: "Extra kconfig fragments, space separated, paths relative to tools/um-arm64/ in the kernel tree. Empty = the validated default build."
+        required: false
+        type: string
+        default: ""
+      run_boot:
+        description: "Run the arm64 marker boot gate"
+        required: false
+        type: boolean
+        default: true
+  schedule:
+    # Monthly re-test against the branch tip (GKI drops roughly monthly).
+    - cron: "17 3 6 * *"
+
+env:
+  NDK_VER: "r28c"
+  KERNEL_REPO: "https://android.googlesource.com/kernel/common"
+  KERNEL_DIR: linux
+  PATCH_DIR: patches
+
+permissions:
+  contents: read
+
+concurrency:
+  group: um-gki618-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: Free disk
+        run: sudo rm -rf /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL || true
+
+      - name: Checkout this repo (patch stack + CI scripts)
+        uses: actions/checkout@v4
+
+      - name: Clone the GKI kernel
+        env:
+          GKI_REF: ${{ inputs.gki_ref || 'android17-6.18' }}
+        run: |
+          set -euo pipefail
+          # Accept a branch or a tag name; strip the full refs/... form.
+          REF="$GKI_REF"; REF="${REF#refs/heads/}"; REF="${REF#refs/tags/}"
+          git clone --depth=1 --single-branch --branch "$REF" "$KERNEL_REPO" "$KERNEL_DIR"
+          cd "$KERNEL_DIR"
+          git log -1 --format='GKI tip: %H  %cd  %s' --date=iso | tee "$GITHUB_WORKSPACE/gki-tip.txt"
+          awk '/^VERSION|^PATCHLEVEL|^SUBLEVEL|^EXTRAVERSION/' Makefile
+        shell: bash
+
+      - name: Apply the um-arm64 patch stack
+        run: |
+          # Stops at the first conflict and leaves apply-report/CONFLICT.txt
+          # + apply-report.tsv behind: a GKI drift becomes a readable report.
+          mkdir -p apply-report
+          bash ci/apply-stack.sh "$KERNEL_DIR" "$PATCH_DIR" "$GITHUB_WORKSPACE/apply-report" 2>&1 | tee apply-report/application.log
+        shell: bash
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang llvm lld libelf-dev zlib1g-dev flex bison make file cpio
+        shell: bash
+
+      - name: Cache NDK
+        id: ndk-cache
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/android-ndk
+          key: ndk-${{ env.NDK_VER }}
+
+      - name: Download NDK
+        if: steps.ndk-cache.outputs.cache-hit != 'true'
+        run: |
+          # Same pattern as build-uml-arm64-bionic.yml: the plain zip, not
+          # sdkmanager. r28c is what the GKI port was validated against.
+          set -euo pipefail
+          curl -fL --retry 3 --retry-delay 5 \
+            "https://dl.google.com/android/repository/android-ndk-${NDK_VER}-linux.zip" \
+            -o /tmp/ndk.zip
+          unzip -q /tmp/ndk.zip -d /tmp/ndk-x
+          mkdir -p /home/runner/android-ndk
+          # the zip unpacks as android-ndk-rXX/, and build-bionic.sh expects
+          # $NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/clang
+          mv /tmp/ndk-x/android-ndk-${NDK_VER}/* /home/runner/android-ndk/
+          rm -rf /tmp/ndk.zip /tmp/ndk-x
+          test -x /home/runner/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/clang
+          /home/runner/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/clang --version | head -1
+        shell: bash
+
+      - name: Build bionic kernel
+        working-directory: ${{ env.KERNEL_DIR }}/tools/um-arm64
+        env:
+          NDK: /home/runner/android-ndk
+          EXTRA_CONFIG: ${{ inputs.extra_config }}
+          TREE: ${{ github.workspace }}/${{ env.KERNEL_DIR }}
+          ART: ${{ github.workspace }}/artifacts
+          O: ${{ runner.temp }}/um-gki618-build
+        run: |
+          # No ccache on purpose, same as build-uml-arm64-bionic.yml.
+          bash harness/build-bionic.sh
+        shell: bash
+
+      - name: Assert the build came out the way the port needs it
+        run: |
+          set -euo pipefail
+          CFG="${{ runner.temp }}/um-gki618-build/.config"
+          test -f "$CFG"
+          # Config the port's fixed-up defconfig/harness must produce:
+          for k in STATIC_LINK UML_NET_VECTOR FRAME_WARN PAGE_SIZE_16KB; do
+            case "$k" in
+              FRAME_WARN) grep -E "^CONFIG_FRAME_WARN=8192$" "$CFG" ;;
+              *)          grep -E "^CONFIG_${k}=y$" "$CFG" ;;
+            esac
+            echo "config ok: $k"
+          done
+          # Symbols the late fixes/backports brought in must be in the image:
+          NM=/home/runner/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm
+          for s in os_futex_wake elf_aux_min_sigstack elf_aux_hwcap2 apply_alternatives; do
+            "$NM" artifacts/linux-bionic | grep -qE " $s\$" || { echo "missing symbol: $s"; exit 1; }
+            echo "symbol ok: $s"
+          done
+          file artifacts/linux-bionic
+        shell: bash
+
+      - name: Collect artifacts
+        run: |
+          set -euo pipefail
+          A="${{ github.workspace }}/artifacts"
+          test -f "$A/linux-bionic" || { echo "linux-bionic missing under $A"; exit 1; }
+          sha256sum "$A/linux-bionic" | tee "$A/SHA256SUMS"
+          [ -f "$A/stub_exe_bionic" ] && sha256sum "$A/stub_exe_bionic" | tee -a "$A/SHA256SUMS"
+          ls -la "$A"
+        shell: bash
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: um-gki618-${{ github.run_number }}
+          path: |
+            artifacts/linux-bionic
+            artifacts/stub_exe_bionic
+            artifacts/SHA256SUMS
+            artifacts/build-bionic-*.log
+            apply-report/
+            gki-tip.txt
+          if-no-files-found: error
+
+  boot:
+    needs: build
+    # Boolean inputs cannot be tested via the `inputs` context in `if:`;
+    # compare the string form instead. Scheduled runs default to boot on.
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.run_boot == 'true' }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - name: Checkout this repo (CI scripts + gate init)
+        uses: actions/checkout@v4
+
+      - name: Download the built kernel
+        uses: actions/download-artifact@v4
+        with:
+          name: um-gki618-${{ github.run_number }}
+          path: ci-artifacts
+
+      - name: Marker boot gate
+        run: |
+          mkdir -p boot-out
+          bash ci/boot-gate.sh ci-artifacts/artifacts/linux-bionic boot-out | tee boot-out/summary.txt
+        shell: bash
+
+      - name: Upload boot log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: um-gki618-boot-${{ github.run_number }}
+          path: |
+            boot-out/boot.log
+            boot-out/summary.txt
+            boot-out/verdict.txt
+          if-no-files-found: warn

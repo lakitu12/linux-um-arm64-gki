@@ -1,0 +1,48 @@
+From 313d69d13e660c09f7e2d063f4d473361c7ee600 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=3D=3FUTF-8=3Fq=3FThomas=3D20Wei=3DC3=3D9Fschuh=3F=3D?=
+ <linux@weissschuh.net>
+Date: Tue, 28 Oct 2025 10:15:43 +0100
+Subject: [PATCH 54/60] um: Remove __access_ok_vsyscall()
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+FIXADDR_USER_START and FIXADDR_USER_END are now always zero.
+
+Signed-off-by: Thomas Weißschuh <linux@weissschuh.net>
+Link: https://patch.msgid.link/20251028-uml-remove-32bit-pseudo-vdso-v1-8-e930063eff5f@weissschuh.net
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+---
+ arch/um/include/asm/uaccess.h | 8 +-------
+ 1 file changed, 1 insertion(+), 7 deletions(-)
+
+diff --git a/arch/um/include/asm/uaccess.h b/arch/um/include/asm/uaccess.h
+index 3770bde..0df9ea4 100644
+--- a/arch/um/include/asm/uaccess.h
++++ b/arch/um/include/asm/uaccess.h
+@@ -15,10 +15,6 @@
+ 	(((unsigned long) (addr) < TASK_SIZE) && \
+ 	 (((unsigned long) (addr) + (size)) < TASK_SIZE))
+ 
+-#define __access_ok_vsyscall(addr, size) \
+-	  (((unsigned long) (addr) >= FIXADDR_USER_START) && \
+-	  ((unsigned long) (addr) + (size) <= FIXADDR_USER_END))
+-
+ #define __addr_range_nowrap(addr, size) \
+ 	((unsigned long) (addr) <= ((unsigned long) (addr) + (size)))
+ 
+@@ -39,9 +35,7 @@ static inline int __access_ok(const void __user *ptr, unsigned long size);
+ static inline int __access_ok(const void __user *ptr, unsigned long size)
+ {
+ 	unsigned long addr = (unsigned long)ptr;
+-	return __addr_range_nowrap(addr, size) &&
+-		(__under_task_size(addr, size) ||
+-		 __access_ok_vsyscall(addr, size));
++	return __addr_range_nowrap(addr, size) && __under_task_size(addr, size);
+ }
+ 
+ #define __get_kernel_nofault(dst, src, type, err_label)			\

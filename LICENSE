@@ -1,0 +1,6 @@
+SPDX-License-Identifier: GPL-2.0-only
+
+This repository contains patches for the Linux kernel and CI helpers for
+building UML (ARCH=um SUBARCH=arm64) kernels. All patches are licensed
+GPL-2.0-only, as is the Linux kernel they are applied to. The upstream
+arm64-UML port is by Oleksii Zakharov (github.com/zalexdev/linux-um-arm64).

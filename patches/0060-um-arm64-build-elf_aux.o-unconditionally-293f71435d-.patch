@@ -1,0 +1,38 @@
+From 3836ac3a3ef99e368678c44c789edf67ec52824f Mon Sep 17 00:00:00 2001
+From: lakitu12 <1219387824@qq.com>
+Date: Fri, 16 Oct 2026 13:34:52 +0800
+Subject: [PATCH 60/60] um/arm64: build elf_aux.o unconditionally (293f71435d's
+ Makefile half)
+
+elf_aux.o was only in obj-y when CONFIG_ARCH_REUSE_HOST_VSYSCALL_AREA
+was set -- an x86-only symbol -- so on SUBARCH=arm64 the object was
+never built and elf_aux_{platform,hwcap,hwcap2,min_sigstack} went
+undefined at the vmlinux link. Upstream made the object unconditional
+in 293f71435d ("um: Always set up AT_HWCAP and AT_PLATFORM"); take that
+half of the commit (its elf_aux.c half is already in place).
+---
+ arch/um/os-Linux/Makefile | 4 +---
+ 1 file changed, 1 insertion(+), 3 deletions(-)
+
+diff --git a/arch/um/os-Linux/Makefile b/arch/um/os-Linux/Makefile
+index fae8367..b91ce24 100644
+--- a/arch/um/os-Linux/Makefile
++++ b/arch/um/os-Linux/Makefile
+@@ -6,7 +6,7 @@
+ # Don't instrument UML-specific code
+ KCOV_INSTRUMENT                := n
+ 
+-obj-y = execvp.o file.o helper.o irq.o main.o mem.o process.o \
++obj-y = elf_aux.o execvp.o file.o helper.o irq.o main.o mem.o process.o \
+ 	registers.o sigio.o signal.o start_up.o time.o tty.o \
+ 	umid.o user_syms.o util.o skas/
+ 
+@@ -14,8 +14,6 @@ CFLAGS_signal.o += -Wframe-larger-than=4096
+ 
+ CFLAGS_main.o += -Wno-frame-larger-than
+ 
+-obj-$(CONFIG_ARCH_REUSE_HOST_VSYSCALL_AREA) += elf_aux.o
+-
+ USER_OBJS := $(user-objs-y) elf_aux.o execvp.o file.o helper.o irq.o \
+ 	main.o mem.o process.o registers.o sigio.o signal.o start_up.o time.o \
+ 	tty.o umid.o util.o

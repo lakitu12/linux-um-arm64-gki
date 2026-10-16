@@ -1,0 +1,30 @@
+From 3f35e9ca422f4d4533bf79b467003af54dd82a8a Mon Sep 17 00:00:00 2001
+From: lakitu12 <1219387824@qq.com>
+Date: Fri, 16 Oct 2026 13:19:19 +0800
+Subject: [PATCH 56/60] um: annotate arch_ptrace() locals used only by x86-only
+ blocks
+
+PTRACE_GETREGS/SETREGS/GET_THREAD_AREA are x86 subarch requests; on
+arm64 the guarding ifdefs compile their uses out, so 'i' and 'vp' are
+unused and -Wunused-variable (via CONFIG_WERROR) fails the build.
+Mark them __maybe_unused; x86 behavior is unchanged.
+---
+ arch/um/kernel/ptrace.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/arch/um/kernel/ptrace.c b/arch/um/kernel/ptrace.c
+index ed237b2..524312c 100644
+--- a/arch/um/kernel/ptrace.c
++++ b/arch/um/kernel/ptrace.c
+@@ -40,9 +40,9 @@ void ptrace_disable(struct task_struct *child)
+ long arch_ptrace(struct task_struct *child, long request,
+ 		 unsigned long addr, unsigned long data)
+ {
+-	int i, ret;
++	int i __maybe_unused, ret;
+ 	unsigned long __user *p = (void __user *)data;
+-	void __user *vp = p;
++	void __user *vp __maybe_unused = p;
+ 
+ 	switch (request) {
+ 	/* read the word at location addr in the USER area. */
