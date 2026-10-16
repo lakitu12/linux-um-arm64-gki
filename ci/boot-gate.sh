@@ -15,6 +15,15 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 
 mkdir -p "$OUT"; OUT=$(cd "$OUT" && pwd)
 
+# Resolve the kernel binary against the caller's cwd before any cd below:
+# callers pass it relative to where they stand (ci/boot-gate.sh
+# ci-artifacts/artifacts/linux-bionic boot-out). Artifact downloads store
+# files 0644, so restore the execute bit the build had set.
+BIND=$(cd "$(dirname "$BIN")" 2>/dev/null && pwd) || { echo "boot-gate.sh: no directory for binary: $1" >&2; exit 2; }
+BIN="$BIND/$(basename "$BIN")"
+[ -f "$BIN" ] || { echo "boot-gate.sh: no such binary: $1" >&2; exit 2; }
+[ -x "$BIN" ] || chmod +x "$BIN"
+
 PS=$(getconf PAGESIZE)
 echo "host: $(uname -m), page size $PS, kernel $(uname -r)"
 case "$PS" in
@@ -40,9 +49,12 @@ set -o pipefail
 # fd1 is a pipe (via tee below), not a regular file: UML registers its
 # console with epoll and epoll_ctl on a regular file fails with EPERM,
 # which stops the console. Pipe through tee, like harness/boot.sh does.
-timeout 600 "$BIN" mem=512M initrd="$OUT/initramfs.cpio.gz" init=/init \
-    panic=-1 con=null con0=null,fd:1 2>&1 | tee boot.log
-rc=$?
+# The kernel is under its own timeout; the tee side carries a backstop so
+# a stub that outlives its tracer cannot hold this step's pipe open
+# (SIGPIPE reaps it). rc is the kernel's, never the pipeline's.
+timeout --signal=KILL 600 "$BIN" mem=512M initrd="$OUT/initramfs.cpio.gz" init=/init \
+    panic=-1 con=null con0=null,fd:1 </dev/null 2>&1 | timeout --signal=KILL 700 stdbuf -oL tee boot.log
+rc=${PIPESTATUS[0]}
 set +o pipefail
 echo "kernel run rc=$rc (the verdict comes from the marker, not this)"
 

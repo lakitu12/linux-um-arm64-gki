@@ -181,6 +181,18 @@ jobs:
             gki-tip.txt
           if-no-files-found: error
 
+      - name: Upload apply report (on failure)
+        # A red run is the monthly-drift deliverable: it must carry the
+        # conflict report as an artifact, not only in the step log.
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: um-gki618-apply-report-${{ github.run_number }}
+          path: |
+            apply-report/
+            gki-tip.txt
+          if-no-files-found: warn
+
   boot:
     needs: build
     # Boolean inputs cannot be tested via the `inputs` context in `if:`;
@@ -197,6 +209,14 @@ jobs:
         with:
           name: um-gki618-${{ github.run_number }}
           path: ci-artifacts
+
+      - name: Install gate tools
+        # The gate bakes its initramfs with the runner's native gcc and
+        # packs it with cpio; don't assume either is in the base image.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc libc6-dev cpio
+        shell: bash
 
       - name: Marker boot gate
         run: |
