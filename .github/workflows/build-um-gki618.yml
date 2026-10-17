@@ -69,7 +69,11 @@ permissions:
   contents: read
 
 concurrency:
-  group: um-gki618-${{ github.ref }}
+  # Variant-scoped: the 16 KB and 4 KB artifacts are independent, so only
+  # same-variant runs supersede each other (a fresh default run replaces an
+  # older default run, including the monthly scheduled one, but never a 4 KB
+  # run — dispatching both back to back is a normal thing to do).
+  group: um-gki618-${{ github.ref }}-${{ github.event.inputs.pages4k == 'true' && '4k' || '16k' }}
   cancel-in-progress: true
 
 jobs:
