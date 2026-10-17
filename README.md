@@ -62,7 +62,8 @@ regression.
 
 Debian/Ubuntu arm64 userland does **not** need this variant: glibc queries the
 page size at runtime and runs on the 16 KB build just as well (measured
-2026-10-17 — a Debian 12.15 root disk booted to a shell on both).
+2026-10-17 — Debian 12.15 and Debian 13.7 root disks both booted to a shell on
+the 16 KB and the 4 KB kernels).
 
 ```sh
 # 4 KB guest pages (artifact: um-gki618-4k-<run>, kernel + its stub)
