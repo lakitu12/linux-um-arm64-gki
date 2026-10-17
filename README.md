@@ -10,11 +10,19 @@ it on an arm64 runner with a marker gate.
 **UP-only**: UML SMP is not included — what it would take is quantified in
 `docs/EXCLUDED-SMP.md`.
 
+This repository is the **standard kernel for the uml-android sandbox** (the
+bionic UML kernel plus its paired stub): pick the page-size variant for the
+host — a guest page can never be smaller than its host, so a 4 KB host runs
+either build and a 16 KB host needs the 16 KB one.  Root disks may be raw
+ext4 or **qcow2** (the stack carries an in-kernel qcow2 engine for the ubd
+backend, `0061–0063`).
+
 ## Layout
 
-- `patches/` — the 60-patch stack; `git am` in order onto `android17-6.18`.
+- `patches/` — the 63-patch stack; `git am` in order onto `android17-6.18`.
   49 upstream-port patches (original authors/dates kept), 3 Android guest
-  fixes, 8 backports/build fixes — the why of each is in `docs/fixlog.md`.
+  fixes, 8 backports/build fixes, 3 qcow2-engine patches — the why of each
+  is in `docs/fixlog.md`.
 - `ci/` — `apply-stack.sh` (stops on conflict, leaves a report),
   `boot-gate.sh` + `init.c` (tiny static initramfs, marker verdict),
   `cfg-check.py` (per-symbol fragment audit), and the kconfig fragments this
@@ -128,6 +136,14 @@ per-fragment depth, and in-guest verification recipes: `docs/GUEST-FEATURES.md`.
 - Kernel-image growth note: this feature set pushed the kernel image end past
   the app-side loader's base; the loader was rebased (fix in the app
   repository) — see `docs/GUEST-FEATURES.md`, "Maintenance".
+- **qcow2 root disks (2026-10-17, patches `0061–0063`)**: `ubd0=` boots a qcow2
+  image directly (read/write engine + refcounts; compressed descriptors on the
+  read path).  The boot job grew a qcow2 gate — verdict on the init marker AND
+  the kernel's `qcow2 "…"` open line — green on the 16 KB default
+  ([39030792171](https://github.com/lakitu12/linux-um-arm64-gki/actions/runs/39030792171),
+  re-run [39036465898](https://github.com/lakitu12/linux-um-arm64-gki/actions/runs/39036465898))
+  and on the 4 KB variant
+  ([39033370998](https://github.com/lakitu12/linux-um-arm64-gki/actions/runs/39033370998)).
 
 ## Credits & license
 
