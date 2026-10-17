@@ -1,0 +1,397 @@
+From fb2d8397c755dbf62886dd6362e6ae247c1f3a0f Mon Sep 17 00:00:00 2001
+From: lakitu12 <1219387824@qq.com>
+Date: Sat, 17 Oct 2026 19:35:14 +0800
+Subject: [PATCH 63/63] tools/um-arm64: host-side selftest for the qcow2 engine
+
+Drives writes, zeroes and discards against qemu-img fixtures with an
+external model, then requires a clean qemu-img check and a
+byte-identical qemu-img convert back to raw.  Four fixtures: compressed
+and plain converted 8M images, an empty 4K-cluster image that exercises
+allocator and refcount-block growth, and the default 64K-cluster empty
+image.  Run tools/um-arm64/qcow2-selftest/run.sh on any x86_64 host.
+---
+ tools/um-arm64/qcow2-selftest/run.sh          |  71 ++++++
+ tools/um-arm64/qcow2-selftest/selftest_os.h   |  29 +++
+ .../um-arm64/qcow2-selftest/shim/asm/types.h  |  18 ++
+ tools/um-arm64/qcow2-selftest/test_qcow2.c    | 229 ++++++++++++++++++
+ 4 files changed, 347 insertions(+)
+ create mode 100755 tools/um-arm64/qcow2-selftest/run.sh
+ create mode 100644 tools/um-arm64/qcow2-selftest/selftest_os.h
+ create mode 100644 tools/um-arm64/qcow2-selftest/shim/asm/types.h
+ create mode 100644 tools/um-arm64/qcow2-selftest/test_qcow2.c
+
+diff --git a/tools/um-arm64/qcow2-selftest/run.sh b/tools/um-arm64/qcow2-selftest/run.sh
+new file mode 100755
+index 0000000..f929ca7
+--- /dev/null
++++ b/tools/um-arm64/qcow2-selftest/run.sh
+@@ -0,0 +1,71 @@
++#!/usr/bin/env bash
++# run.sh -- host-side selftest for the ubd qcow2 engine (qcow2_user.c).
++#
++# Builds the engine with the host shims and exercises four fixtures:
++#   c  compressed (deflate) 8M image converted from a raw pattern
++#   p  plain converted 8M image (standard clusters)
++#   e  empty image, 4K clusters: allocator, new L2 tables, new refcount
++#      blocks (a 12M write crosses the 2048-entry refcount block)
++#   z  empty image, 64K clusters (the default)
++#
++# Judgement is external to the engine: qemu-img check after the dirty
++# phase (accounting: no errors, no leaked clusters) and qemu-img convert
++# -O raw byte-compared against the model the engine was driven against.
++set -euo pipefail
++
++HERE=$(cd "$(dirname "$0")" && pwd)
++ROOT=$(cd "$HERE/../../.." && pwd)
++DRV="$ROOT/arch/um/drivers"
++CC=${CC:-cc}
++W=$(mktemp -d "${TMPDIR:-/tmp}/qc2test.XXXXXX")
++trap 'rm -rf "$W"' EXIT
++
++echo "== build =="
++$CC -O2 -Wall -Wextra -Wno-unused-parameter \
++	-DQCOW2_SELFTEST -I "$HERE" -I "$HERE/shim" -I "$DRV" \
++	"$HERE/test_qcow2.c" "$DRV/qcow2_user.c" "$DRV/qcow2_inflate_user.c" \
++	-o "$W/test_qcow2"
++
++echo "== fixtures =="
++python3 - "$W" <<'PY'
++import random, sys, os
++w = sys.argv[1]
++r = random.Random(42)
++data = bytearray(r.randbytes(8 * 1024 * 1024))
++for _ in range(20):                      # zero runs: the source is sparse-ish
++    off = r.randrange(0, len(data) - 65536)
++    data[off:off + 65536] = b"\0" * 65536
++open(os.path.join(w, "raw8m"), "wb").write(data)
++zf = open(os.path.join(w, "zeros64m"), "wb")
++zf.truncate(64 * 1024 * 1024)
++zf.close()
++print("fixtures written")
++PY
++qemu-img convert -O qcow2 -c "$W/raw8m" "$W/c.qcow2"
++qemu-img convert -O qcow2    "$W/raw8m" "$W/p.qcow2"
++qemu-img create -f qcow2 -o cluster_size=4096 "$W/e.qcow2" 64M >/dev/null
++qemu-img create -f qcow2 "$W/z.qcow2" 64M >/dev/null
++
++run_one() {
++	local name=$1 img=$2 src=$3
++
++	echo "== $name: run =="
++	"$W/test_qcow2" "$img" "$src" "$W/$name.expected" run
++	echo "== $name: qemu-img check =="
++	qemu-img check "$img" | tee "$W/$name.check"
++	grep -q "No errors were found" "$W/$name.check"
++	! grep -qiE "leaked|corrupt" "$W/$name.check"
++	echo "== $name: verify (fresh open) =="
++	"$W/test_qcow2" "$img" - "$W/$name.expected" verify
++	echo "== $name: convert-back byte compare =="
++	qemu-img convert -O raw "$img" "$W/$name.back.raw"
++	cmp "$W/$name.back.raw" "$W/$name.expected"
++	echo "== $name: OK =="
++}
++
++run_one c "$W/c.qcow2" "$W/raw8m"
++run_one p "$W/p.qcow2" "$W/raw8m"
++run_one e "$W/e.qcow2" "$W/zeros64m"
++run_one z "$W/z.qcow2" "$W/zeros64m"
++
++echo "ALL PASS"
+\ No newline at end of file
+diff --git a/tools/um-arm64/qcow2-selftest/selftest_os.h b/tools/um-arm64/qcow2-selftest/selftest_os.h
+new file mode 100644
+index 0000000..aa184ce
+--- /dev/null
++++ b/tools/um-arm64/qcow2-selftest/selftest_os.h
+@@ -0,0 +1,29 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * os_* wrappers for the host-side qcow2 selftest.  The engine calls only
++ * these two; the semantics mirror arch/um/os-Linux/file.c: bytes moved on
++ * success, -errno on failure.
++ */
++#ifndef __SELFTEST_OS_H__
++#define __SELFTEST_OS_H__
++
++#include <unistd.h>
++#include <errno.h>
++
++static inline int os_pread_file(int fd, void *buf, int len,
++				unsigned long long offset)
++{
++	ssize_t n = pread(fd, buf, len, offset);
++
++	return n < 0 ? -errno : (int)n;
++}
++
++static inline int os_pwrite_file(int fd, const void *buf, int count,
++				 unsigned long long offset)
++{
++	ssize_t n = pwrite(fd, buf, count, offset);
++
++	return n < 0 ? -errno : (int)n;
++}
++
++#endif /* __SELFTEST_OS_H__ */
+\ No newline at end of file
+diff --git a/tools/um-arm64/qcow2-selftest/shim/asm/types.h b/tools/um-arm64/qcow2-selftest/shim/asm/types.h
+new file mode 100644
+index 0000000..8608aa9
+--- /dev/null
++++ b/tools/um-arm64/qcow2-selftest/shim/asm/types.h
+@@ -0,0 +1,18 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/* Host shim: qcow2.h asks for <asm/types.h>; off-UML that is stdint. */
++#ifndef __SHIM_ASM_TYPES_H__
++#define __SHIM_ASM_TYPES_H__
++
++#include <stdint.h>
++
++typedef uint8_t  __u8;
++typedef uint16_t __u16;
++typedef uint32_t __u32;
++typedef uint64_t __u64;
++
++typedef int8_t   __s8;
++typedef int16_t  __s16;
++typedef int32_t  __s32;
++typedef int64_t  __s64;
++
++#endif /* __SHIM_ASM_TYPES_H__ */
+\ No newline at end of file
+diff --git a/tools/um-arm64/qcow2-selftest/test_qcow2.c b/tools/um-arm64/qcow2-selftest/test_qcow2.c
+new file mode 100644
+index 0000000..bfb53d2
+--- /dev/null
++++ b/tools/um-arm64/qcow2-selftest/test_qcow2.c
+@@ -0,0 +1,229 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Host-side functional test for the ubd qcow2 engine
++ * (arch/um/drivers/qcow2_user.c).
++ *
++ * The engine is driven directly with the same os_* shims the UML build
++ * uses (selftest_os.h), against images produced by qemu-img.  Correctness
++ * is judged by an external model, not by the engine itself:
++ *
++ *   run     phase 1  read the whole image, compare against the source raw
++ *           phase 2  apply a deterministic mix of writes, write-zeroes and
++ *                    discards (<= 64K per call, the ubd request limit),
++ *                    tracking the expected content; then a heavy sequential
++ *                    write span that exercises the allocator and the
++ *                    refcount-block creation path
++ *           phase 3  dump the expected model to <out>
++ *   verify  reopen from scratch; whole-image read plus random point reads
++ *           against <out>
++ *
++ * The shell script then runs qemu-img check (accounting truth) and
++ * converts the image back to raw for a byte comparison (content truth).
++ */
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <fcntl.h>
++#include <unistd.h>
++#include <errno.h>
++#include <stdint.h>
++
++#include "qcow2.h"
++
++#define MAX_IO (64 * 1024)
++
++static uint64_t rng_state = 0x9e3779b97f4a7c15ULL;
++
++static uint32_t rnd(void)
++{
++	rng_state ^= rng_state << 13;
++	rng_state ^= rng_state >> 7;
++	rng_state ^= rng_state << 17;
++	return (uint32_t)(rng_state >> 32);
++}
++
++/*
++ * Discard semantics as implemented: ranges fully covering a cluster drop
++ * its mapping (reads become zeros); partial clusters are left alone.
++ */
++static void model_discard(uint8_t *buf, uint64_t off, uint64_t len,
++			  uint64_t cs)
++{
++	uint64_t end = off + len, c;
++
++	for (c = off / cs; c <= (end - 1) / cs; c++) {
++		uint64_t cstart = c * cs, cend = cstart + cs;
++		uint64_t s = cstart > off ? cstart : off;
++		uint64_t e = cend < end ? cend : end;
++
++		if (s == cstart && e == cend)
++			memset(buf + cstart, 0, cs);
++	}
++}
++
++static void fail(const char *msg, int rc)
++{
++	fprintf(stderr, "FAIL: %s (rc=%d)\n", msg, rc);
++	exit(1);
++}
++
++int main(int argc, char **argv)
++{
++	const char *img, *raw, *out, *mode;
++	struct qcow2_geom g;
++	struct qcow2_state *st;
++	const char *err;
++	void *arena;
++	uint8_t *expected, *got, *data;
++	uint64_t size, i;
++	int fd, rc;
++
++	if (argc != 5) {
++		fprintf(stderr,
++			"usage: %s <img.qcow2> <raw|-> <expected.raw> run|verify\n",
++			argv[0]);
++		return 2;
++	}
++	img = argv[1]; raw = argv[2]; out = argv[3]; mode = argv[4];
++
++	fd = open(img, O_RDWR);
++	if (fd < 0) fail("open image", -errno);
++	rc = qcow2_identify(fd);
++	if (rc != 1) fail("identify (not a qcow2 image?)", rc);
++	rc = qcow2_read_geom(fd, &g, &err);
++	if (rc) {
++		fprintf(stderr, "read_geom: %s (rc=%d)\n", err, rc);
++		return 1;
++	}
++	fprintf(stderr,
++		"[%s] geom: cluster=%llu virt=%llu l1=%u l2ent=%u rbent=%u%s\n",
++		mode, (unsigned long long)g.cluster_size,
++		(unsigned long long)g.virt_size, g.l1_size, g.l2_entries,
++		g.rb_entries, g.read_only ? " (read-only)" : "");
++
++	size = g.virt_size;
++	expected = malloc(size);
++	got = malloc(size);
++	data = malloc(MAX_IO);
++	if (!expected || !got || !data)
++		fail("malloc", -ENOMEM);
++
++	arena = malloc(qcow2_state_size(&g));
++	if (!arena)
++		fail("arena malloc", -ENOMEM);
++	rc = qcow2_init(fd, &g, arena, qcow2_state_size(&g), &st);
++	if (rc)
++		fail("qcow2_init", rc);
++
++	{
++		FILE *f = fopen(strcmp(mode, "run") ? out : raw, "rb");
++
++		if (!f)
++			fail("open model source", -errno);
++		if (fread(expected, 1, size, f) != size)
++			fail("short model source", -EIO);
++		fclose(f);
++	}
++
++	/* whole-image read: phase 1 in run mode, the core check in verify */
++	rc = qcow2_read(st, fd, 0, (unsigned long)size, got);
++	if (rc)
++		fail("read whole image", rc);
++	if (memcmp(got, expected, size)) {
++		for (i = 0; i < size && got[i] == expected[i]; i++)
++			;
++		fprintf(stderr, "differ at %llu: got %02x want %02x\n",
++			(unsigned long long)i, got[i], expected[i]);
++		fail("whole-image read vs model", -EIO);
++	}
++	fprintf(stderr, "[%s] whole-image read OK (%llu bytes)\n", mode,
++		(unsigned long long)size);
++
++	if (!strcmp(mode, "run")) {
++		uint64_t off, span;
++
++		/* mixed op stream: 70% writes / 15% zeroes / 15% discards */
++		for (i = 0; i < 600; i++) {
++			uint32_t op = rnd() % 100;
++			unsigned int len;
++
++			off = rnd() % size;
++			len = 1 + rnd() % MAX_IO;
++			if (off + len > size)
++				len = (unsigned int)(size - off);
++
++			if (op < 70) {
++				unsigned int j;
++
++				for (j = 0; j < len; j++)
++					data[j] = (uint8_t)(rnd() >> 24);
++				rc = qcow2_write(st, fd, off, len, data);
++				if (rc)
++					fail("write", rc);
++				memcpy(expected + off, data, len);
++			} else if (op < 85) {
++				rc = qcow2_write_zeroes(st, fd, off, len);
++				if (rc)
++					fail("write_zeroes", rc);
++				memset(expected + off, 0, len);
++			} else {
++				rc = qcow2_discard(st, fd, off, len);
++				if (rc)
++					fail("discard", rc);
++				model_discard(expected, off, len, g.cluster_size);
++			}
++		}
++		fprintf(stderr, "[run] mixed ops (600) applied\n");
++
++		/* heavy sequential span at the end: allocator, new L2 tables,
++		 * and (with 4K clusters) new refcount blocks */
++		span = size / 4;
++		if (span > 12 * 1024 * 1024)
++			span = 12 * 1024 * 1024;
++		for (off = size - span; off < size; off += MAX_IO) {
++			unsigned int j, n;
++
++			n = (unsigned int)((size - off < MAX_IO) ?
++					   (size - off) : MAX_IO);
++			for (j = 0; j < n; j++)
++				data[j] = (uint8_t)((off + j) * 31 + 7);
++			rc = qcow2_write(st, fd, off, n, data);
++			if (rc)
++				fail("heavy write", rc);
++			memcpy(expected + off, data, n);
++		}
++		fprintf(stderr, "[run] heavy span (%llu bytes) applied\n",
++			(unsigned long long)span);
++
++		{
++			FILE *f = fopen(out, "wb");
++
++			if (!f)
++				fail("open model out", -errno);
++			if (fwrite(expected, 1, size, f) != size)
++				fail("write model out", -EIO);
++			fclose(f);
++		}
++		fprintf(stderr, "[run] model dumped to %s\n", out);
++	}
++
++	/* random point reads (both modes) */
++	for (i = 0; i < 400; i++) {
++		uint64_t off = rnd() % size;
++		unsigned int len = 1 + rnd() % MAX_IO;
++
++		if (off + len > size)
++			len = (unsigned int)(size - off);
++		rc = qcow2_read(st, fd, off, len, got);
++		if (rc)
++			fail("point read", rc);
++		if (memcmp(got, expected + off, len)) {
++			fprintf(stderr, "point read differs at %llu+%u\n",
++				(unsigned long long)off, len);
++			fail("point read vs model", -EIO);
++		}
++	}
++	fprintf(stderr, "[%s] point reads OK\n", mode);
++	fprintf(stderr, "[%s] PASS\n", mode);
++	return 0;
++}
+\ No newline at end of file

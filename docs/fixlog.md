@@ -66,3 +66,15 @@
 - build9 rc=0；产物 artifacts/linux-bionic（90,765,944B，静态 aarch64）+ artifacts/stub_exe_bionic（1,920B）。
 - md5: linux-bionic=e4071fb1 / stub_exe=5028a36a；完整 sha256 见 report/build-success.txt。
 - 工具链: /usr/lib/android-ndk r28c (28.2.13676358)，NDK API=30，JOBS=12。
+
+## qcow2 根盘支持（2026-10-17，补丁 0061–0063）
+
+- ubd 内建 qcow2 读写引擎（qcow2_user.c + 裁剪版 tinfl）。读侧：压缩（deflate）/零/未分配
+  三分支；写侧：分配簇并维护 L2/refcount，崩溃序 = 泄漏可修、绝不悬引未落盘数据。
+  审稿提示：bit0 只在标准描述符上是零标志，压缩描述符的 bit0 属于 offset。
+- 拒收口径（开仓印理由）：backing / 快照（只读） / 加密 / 外部数据文件 / extended L2 /
+  zstd / 非 16-bit refcount / 簇大小 512..64K 之外；qcow2 作 COW backing 明确拒绝。
+- 宿主 selftest 先行：`tools/um-arm64/qcow2-selftest`（qemu-img check 干净 + convert 回
+  raw 逐字节相等；四组夹具含压缩/普通/4K 簇空盘跨 refcount 块分配）。
+- CI 新增 `ci/qcow2-gate.sh`：ext4 根盘转 qcow2 以 ubd0 引导；判据 = init marker +
+  内核 `qcow2 "` 开盘点双串。boot job 已接线（e2fsprogs/qemu-utils）。

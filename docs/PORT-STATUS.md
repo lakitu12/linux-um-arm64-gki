@@ -58,3 +58,11 @@ CI 合并 `ci/page4k.config`（16K 关、4K 开），断言改查 `CONFIG_PAGE_S
 - 用途口径（更正）：4K 变体**不是**因为 Debian/Ubuntu 需要它——实测 16K 版同样跑 Debian
   （glibc 运行时查页大小）；它服务的是「与 4K 宿主逐页对齐」和「构建期写死 4096 的载荷」
   （唯一实测受害者：4K 对齐的静态 bionic `ctty`）
+
+### qcow2 根盘支持（补丁 0061–0063，2026-10-17）
+
+- ubd 可直接引导 qcow2（`ubd0=<img>.qcow2`）：直读 + 分配写 + refcount 全维护，
+  boot job 含 `ci/qcow2-gate.sh` 双串判据用例。
+- backing / 快照 / 加密 / zstd / 扩展 L2 拒收并给理由；详细口径见 fixlog。
+- 7.2 参考树对应提交与宿主 selftest 位于 `lakitu12/linux-um-arm64`
+  的 `tools/um-arm64/qcow2-selftest/`。

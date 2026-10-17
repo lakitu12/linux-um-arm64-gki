@@ -303,17 +303,24 @@ jobs:
           path: ci-artifacts
 
       - name: Install gate tools
-        # The gate bakes its initramfs with the runner's native gcc and
-        # packs it with cpio; don't assume either is in the base image.
+        # The gates bake their fixtures with the runner's native gcc (cpio
+        # for the initramfs; e2fsprogs + qemu-img for the qcow2 root disk);
+        # don't assume any of them is in the base image.
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc libc6-dev cpio
+          sudo apt-get install -y --no-install-recommends gcc libc6-dev cpio e2fsprogs qemu-utils
         shell: bash
 
       - name: Marker boot gate
         run: |
           mkdir -p boot-out
           bash ci/boot-gate.sh ci-artifacts/artifacts/linux-bionic boot-out | tee boot-out/summary.txt
+        shell: bash
+
+      - name: qcow2 root-disk gate
+        run: |
+          mkdir -p boot-out-qcow2
+          bash ci/qcow2-gate.sh ci-artifacts/artifacts/linux-bionic boot-out-qcow2 | tee boot-out-qcow2/summary.txt
         shell: bash
 
       - name: Upload boot log
@@ -325,4 +332,15 @@ jobs:
             boot-out/boot.log
             boot-out/summary.txt
             boot-out/verdict.txt
+          if-no-files-found: warn
+
+      - name: Upload qcow2 gate log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: um-gki618-qcow2-boot${{ env.PAGE_SUFFIX }}-${{ github.run_number }}
+          path: |
+            boot-out-qcow2/boot.log
+            boot-out-qcow2/summary.txt
+            boot-out-qcow2/verdict.txt
           if-no-files-found: warn
