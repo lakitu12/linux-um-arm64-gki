@@ -47,12 +47,18 @@ work lives in a separate repository).
 | `run_boot` | run the arm64 marker boot gate (default on) |
 
 The port defaults to **16 KB** guest pages (`patches/0025`): Android 15+ hosts are
-16 KB, and a guest page can never be smaller than the host's. The 4 KB variant is
-the right artifact when the host is 4 KB *and* the guest userland assumes 4 KB —
-Debian/Ubuntu arm64 images, older Android system images (a redroid `linker64`
-dies inside its first init path on a 16 KB guest, measured on a 4 KB host). It
-must not be run on a 16 KB host: the kernel refuses at boot (`os_early_checks`),
-which is the correct behaviour, not a regression.
+16 KB, and a guest page can never be smaller than the host's. Build the 4 KB
+variant when guest pages must match a 4 KB host exactly, or when the payload
+carries build-time 4 KB assumptions — the measured casualty is a statically
+linked bionic binary built with `max-page-size=4096`; ELF `p_align` on its own is
+not the issue (two otherwise identical `-nostdlib` payloads, 0x1000- vs
+0x4000-aligned, both run on a 16 KB guest). It must not be run on a 16 KB host:
+the kernel refuses at boot (`os_early_checks`), which is correct, not a
+regression.
+
+Debian/Ubuntu arm64 userland does **not** need this variant: glibc queries the
+page size at runtime and runs on the 16 KB build just as well (measured
+2026-10-17 — a Debian 12.15 root disk booted to a shell on both).
 
 ```sh
 # 4 KB guest pages (artifact: um-gki618-4k-<run>, kernel + its stub)

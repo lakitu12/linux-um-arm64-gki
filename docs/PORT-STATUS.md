@@ -34,3 +34,27 @@ TREE=$PWD/../../.. JOBS=12 bash build-bionic.sh
 1. **真机 gate**：按 `tools/um-arm64/harness/android.sh`（页大小匹配→探针→marker 判定）
 2. **CI 化**：apply→build→boot，绑定 GKI release tag 自动试套（可代搭 workflow）
 3. **接入 uml-android**：本产物为 16K 页版（16K guest 可跑 4K/16K 宿主）
+
+## 4K 变体（pages4k，2026-10-17）
+
+同一补丁栈的另一种 guest 页大小，走 CI 输入而非手改树：
+
+```bash
+gh workflow run build-um-gki618.yml -f pages4k=true    # 产物名带 -4k 后缀
+```
+
+CI 合并 `ci/page4k.config`（16K 关、4K 开），断言改查 `CONFIG_PAGE_SIZE_4KB`。
+
+- ✅ CI run [38993132552](https://github.com/lakitu12/linux-um-arm64-gki/actions/runs/38993132552)：
+  日志 `4 KB variant: EXTRA_CONFIG=config/page4k.config`、`expecting guest page size: PAGE_SIZE_4KB`、
+  `config ok: PAGE_SIZE_4KB`，apply→build→arm64 boot gate 全绿
+- `artifacts/linux-bionic` — 94,851,728 B，banner `Linux version 6.18.32-g7d90328d3e59`
+  sha256 `3452655338856e032e1ffb3a15a099bb848a0ede29490921becb8ef41080fb32`
+- `artifacts/stub_exe_bionic` — 1,920 B
+  sha256 `4972b0e3c96e204a4a98e2e61ffdf0ad76bf74a5d9d72944e787ed02212e27be`
+  （与 16K 版**逐字节相同**：stub 由移植代码决定，与内核页大小/版本无关）
+- 真机验证（marble，uml-android app）：引导 Debian 12.15 根盘到交互 shell，
+  `getconf PAGESIZE`=4096、`dpkg -l`=104、perl 5.36、`sleep 30`+`^C` 2s 回提示
+- 用途口径（更正）：4K 变体**不是**因为 Debian/Ubuntu 需要它——实测 16K 版同样跑 Debian
+  （glibc 运行时查页大小）；它服务的是「与 4K 宿主逐页对齐」和「构建期写死 4096 的载荷」
+  （唯一实测受害者：4K 对齐的静态 bionic `ctty`）
