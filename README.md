@@ -48,11 +48,15 @@ work lives in a separate repository).
 
 The port defaults to **16 KB** guest pages (`patches/0025`): Android 15+ hosts are
 16 KB, and a guest page can never be smaller than the host's. Build the 4 KB
-variant when guest pages must match a 4 KB host exactly, or when the payload
-carries build-time 4 KB assumptions — the measured casualty is a statically
-linked bionic binary built with `max-page-size=4096`; ELF `p_align` on its own is
-not the issue (two otherwise identical `-nostdlib` payloads, 0x1000- vs
-0x4000-aligned, both run on a 16 KB guest). It must not be run on a 16 KB host:
+variant when guest pages must match a 4 KB host exactly, or when a payload's
+segments are not congruent modulo 16 KB. The loader's requirement is per
+PT_LOAD: `(p_vaddr - p_offset) % PAGE_SIZE == 0`. `-z max-page-size=4096` lets
+the linker split a segment that is congruent modulo 4 KB but not 16 KB, and
+that segment then maps where the program was not linked (measured: a
+bionic-static probe built that way dies with SIGSEGV 139 on a 16 KB guest and
+runs on a 4 KB one, while its 16 KB-aligned twin runs on both; the old
+4 KB-aligned `ctty` helper had exactly that shape). It must not be run on a
+16 KB host:
 the kernel refuses at boot (`os_early_checks`), which is correct, not a
 regression.
 
