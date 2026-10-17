@@ -107,6 +107,28 @@ per-fragment depth, and in-guest verification recipes: `docs/GUEST-FEATURES.md`.
   [38875955444](https://github.com/lakitu12/linux-um-arm64-gki/actions/runs/38875955444),
   2026-10-16.
 
+- **Guest feature set validated (2026-10-17)**: both page-size variants were
+  rebuilt with the default feature set merged and are green end to end —
+  [39015377404](https://github.com/lakitu12/linux-um-arm64-gki/actions/runs/39015377404)
+  (16 KB default; `linux-bionic` sha256 `f40f4088…04c7c4c8`,
+  `stub_exe_bionic` `83f51f7c…0781fc` — the stub is byte-identical to the
+  baseline above) and
+  [39015169891](https://github.com/lakitu12/linux-um-arm64-gki/actions/runs/39015169891)
+  (4 KB variant; `linux-bionic` `d24d6347…ef8e3377`,
+  `stub_exe_bionic` `4972b0e3…2e27be`).  The assert step's per-symbol audit
+  passed in CI (`cfg-check: ALL-GREEN` over all four fragments) and both
+  artifacts passed the arm64 marker boot gate.
+- **On a device** (marble, through the app repository's loader) the same
+  binaries were exercised end to end: `/proc/config.gz` shows the whole
+  26-key set, `unshare -Urmpf` rc=0, squashfs mounts through a loop device,
+  bubblewrap sandboxes, and docker.io 26.1.5 runs — `hello-world` completes,
+  `nginx:alpine` published on 8080 answers the guest's own loopback,
+  storage driver `overlay2`, cgroup2 mounted (controllers cpu/io/memory/pids).
+  The 16 KB build checks out the same way (`getconf PAGESIZE` 16384).
+- Kernel-image growth note: this feature set pushed the kernel image end past
+  the app-side loader's base; the loader was rebased (fix in the app
+  repository) — see `docs/GUEST-FEATURES.md`, "Maintenance".
+
 ## Credits & license
 
 - Upstream arm64 UML port by **Oleksii Zakharov**

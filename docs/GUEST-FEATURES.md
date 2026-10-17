@@ -60,3 +60,10 @@ side needs `/dev/fuse`:
   — the audit stays green either way.
 - The 4 KB variant (`pages4k`) merges on top of the same set; nothing here
   is page-size dependent.
+- Kernel image growth: the app-side loader maps the kernel at 0x60000000 and
+  sits at a fixed base just above the image end (0x60AF0000 after the
+  2026-10-17 rebase).  When a shipped kernel's image end crosses that base,
+  every boot dies with exit 64 (-EEXIST in the loader's image mapper) — this
+  feature set did exactly that.  Re-check after any config that grows the
+  kernel; the loader.ld in the app repository carries the rule, and the
+  loader now prints a self-diagnosis hint on EEXIST.
