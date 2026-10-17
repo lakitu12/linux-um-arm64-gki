@@ -36,6 +36,11 @@ on:
         required: false
         type: string
         default: ""
+      pages4k:
+        description: "Build the 4 KB guest-page variant instead of the validated 16 KB default (fragment: ci/page4k.config); artifacts get a -4k suffix."
+        required: false
+        type: boolean
+        default: false
       run_boot:
         description: "Run the arm64 marker boot gate"
         required: false
@@ -48,6 +53,11 @@ on:
 env:
   NDK_VER: "r28c"
   KERNEL_REPO: "https://android.googlesource.com/kernel/common"
+  # "" or "-4k", from the pages4k input.  The artifact names must match across
+  # the build and boot jobs, so the suffix is derived once, here.  Boolean
+  # inputs cannot be tested through the `inputs` context in `if:`; compare the
+  # string form instead (same reason the run_boot gate below does).
+  PAGE_SUFFIX: "${{ github.event.inputs.pages4k == 'true' && '-4k' || '' }}"
   KERNEL_DIR: linux
   PATCH_DIR: patches
 
@@ -134,6 +144,15 @@ jobs:
           ART: ${{ github.workspace }}/artifacts
           O: ${{ runner.temp }}/um-gki618-build
         run: |
+          # 4 KB variant (pages4k=true): the port's default is 16 KB guest
+          # pages.  The fragment lives in ci/ so the variant is one input
+          # rather than a hand edit; build-bionic.sh merges it (EXTRA_CONFIG)
+          # before olddefconfig, so its dependencies resolve.
+          if [ "${{ github.event.inputs.pages4k }}" = "true" ]; then
+            cp "$GITHUB_WORKSPACE/ci/page4k.config" config/page4k.config
+            export EXTRA_CONFIG="${EXTRA_CONFIG:+$EXTRA_CONFIG }config/page4k.config"
+            echo "4 KB variant: EXTRA_CONFIG=$EXTRA_CONFIG"
+          fi
           # No ccache on purpose, same as build-uml-arm64-bionic.yml.
           bash harness/build-bionic.sh
         shell: bash
@@ -144,7 +163,15 @@ jobs:
           CFG="${{ runner.temp }}/um-gki618-build/.config"
           test -f "$CFG"
           # Config the port's fixed-up defconfig/harness must produce:
-          for k in STATIC_LINK UML_NET_VECTOR FRAME_WARN PAGE_SIZE_16KB; do
+          # The page size follows the variant: pages4k=true builds 4 KB guest
+          # pages, the validated default is 16 KB.
+          if [ "${{ github.event.inputs.pages4k }}" = "true" ]; then
+            PGSIZE=PAGE_SIZE_4KB
+          else
+            PGSIZE=PAGE_SIZE_16KB
+          fi
+          echo "expecting guest page size: $PGSIZE"
+          for k in STATIC_LINK UML_NET_VECTOR FRAME_WARN "$PGSIZE"; do
             case "$k" in
               FRAME_WARN) grep -E "^CONFIG_FRAME_WARN=8192$" "$CFG" ;;
               *)          grep -E "^CONFIG_${k}=y$" "$CFG" ;;
@@ -184,7 +211,7 @@ jobs:
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: um-gki618-${{ github.run_number }}
+          name: um-gki618${{ env.PAGE_SUFFIX }}-${{ github.run_number }}
           path: |
             artifacts/linux-bionic
             artifacts/stub_exe_bionic
@@ -201,7 +228,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: um-gki618-failure-${{ github.run_number }}
+          name: um-gki618-failure${{ env.PAGE_SUFFIX }}-${{ github.run_number }}
           path: |
             apply-report/
             gki-tip.txt
@@ -226,7 +253,7 @@ jobs:
       - name: Download the built kernel
         uses: actions/download-artifact@v4
         with:
-          name: um-gki618-${{ github.run_number }}
+          name: um-gki618${{ env.PAGE_SUFFIX }}-${{ github.run_number }}
           path: ci-artifacts
 
       - name: Install gate tools
@@ -247,7 +274,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: um-gki618-boot-${{ github.run_number }}
+          name: um-gki618-boot${{ env.PAGE_SUFFIX }}-${{ github.run_number }}
           path: |
             boot-out/boot.log
             boot-out/summary.txt

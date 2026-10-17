@@ -37,6 +37,30 @@ Output: `linux-bionic` + `stub_exe_bionic` — static aarch64 binaries that run
 as ordinary unprivileged processes (adb shell or an Android app; the app-side
 work lives in a separate repository).
 
+## Build variants (workflow_dispatch inputs)
+
+| input | effect |
+|---|---|
+| `gki_ref` | kernel/common branch or tag the stack is applied to (default `android17-6.18`) |
+| `extra_config` | extra kconfig fragments, space separated, resolved inside `tools/um-arm64/` |
+| `pages4k` | build the **4 KB guest-page** variant: merge `ci/page4k.config`, assert `CONFIG_PAGE_SIZE_4KB` instead of `_16KB`, suffix the artifacts `-4k` |
+| `run_boot` | run the arm64 marker boot gate (default on) |
+
+The port defaults to **16 KB** guest pages (`patches/0025`): Android 15+ hosts are
+16 KB, and a guest page can never be smaller than the host's. The 4 KB variant is
+the right artifact when the host is 4 KB *and* the guest userland assumes 4 KB —
+Debian/Ubuntu arm64 images, older Android system images (a redroid `linker64`
+dies inside its first init path on a 16 KB guest, measured on a 4 KB host). It
+must not be run on a 16 KB host: the kernel refuses at boot (`os_early_checks`),
+which is the correct behaviour, not a regression.
+
+```sh
+# 4 KB guest pages (artifact: um-gki618-4k-<run>, kernel + its stub)
+gh workflow run build-um-gki618.yml -f pages4k=true
+# 16 KB default, plus an extra fragment
+gh workflow run build-um-gki618.yml -f extra_config=config/docker.config
+```
+
 ## Validation status
 
 - Baseline `android17-6.18` @ **6.18.32**; the stack applies 60/60 and the
