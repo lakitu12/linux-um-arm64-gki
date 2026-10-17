@@ -16,7 +16,10 @@ it on an arm64 runner with a marker gate.
   49 upstream-port patches (original authors/dates kept), 3 Android guest
   fixes, 8 backports/build fixes — the why of each is in `docs/fixlog.md`.
 - `ci/` — `apply-stack.sh` (stops on conflict, leaves a report),
-  `boot-gate.sh` + `init.c` (tiny static initramfs, marker verdict).
+  `boot-gate.sh` + `init.c` (tiny static initramfs, marker verdict),
+  `cfg-check.py` (per-symbol fragment audit), and the kconfig fragments this
+  repo adds on top of the port's (`page4k`, `docker-completions`,
+  `snap-flatpak`, `android-guest`).
 - `.github/workflows/build-um-gki618.yml` — apply → build → boot; the
   scheduled run re-tests the stack against the branch tip monthly, so a GKI
   drift shows up as a red run carrying a conflict report.
@@ -42,7 +45,7 @@ work lives in a separate repository).
 | input | effect |
 |---|---|
 | `gki_ref` | kernel/common branch or tag the stack is applied to (default `android17-6.18`) |
-| `extra_config` | extra kconfig fragments, space separated, resolved inside `tools/um-arm64/` |
+| `extra_config` | extra kconfig fragments **appended to the default guest feature set** (space separated, resolved inside `tools/um-arm64/`) |
 | `pages4k` | build the **4 KB guest-page** variant: merge `ci/page4k.config`, assert `CONFIG_PAGE_SIZE_4KB` instead of `_16KB`, suffix the artifacts `-4k` |
 | `run_boot` | run the arm64 marker boot gate (default on) |
 
@@ -68,9 +71,26 @@ the 16 KB and the 4 KB kernels).
 ```sh
 # 4 KB guest pages (artifact: um-gki618-4k-<run>, kernel + its stub)
 gh workflow run build-um-gki618.yml -f pages4k=true
-# 16 KB default, plus an extra fragment
-gh workflow run build-um-gki618.yml -f extra_config=config/docker.config
+# 16 KB default, plus one extra fragment on top of the feature set
+gh workflow run build-um-gki618.yml -f extra_config=config/usb-wifi.config
 ```
+
+## Guest feature set (merged by default)
+
+Every build merges the following fragments, so the artifact the app runs
+carries the guests' feature set without a dispatch input:
+
+| fragment | enables | consumers |
+|---|---|---|
+| `config/docker.config` (the port) | docker's `check-config.sh` set — namespaces, cgroups, overlayfs, veth/bridge/netfilter/nftables, seccomp, keys | docker in Linux guests |
+| `ci/docker-completions.config` | companions so none of the port's requests silently drops (`NET_SCHED`, `NFT_FIB_IPV6`) | completeness |
+| `ci/snap-flatpak.config` | squashfs (+ zlib/lzo/xz/zstd, xattr) for snap; `FUSE_FS` for flatpak's portals (also the Android sdcard daemon) | snap, flatpak, Android |
+| `ci/android-guest.config` | binder + the `FTRACE`/`SCHED_TRACER` pair that brings `EVENT_TRACING` on, `PSI`, netd's remaining netfilter faces | redroid-class Android guests |
+
+The assert step audits all of it: a curated key list plus `ci/cfg-check.py`
+over every request line of every fragment — a renamed or dependency-broken
+symbol is a red run naming the symbol, not a device surprise.  Rationale,
+per-fragment depth, and in-guest verification recipes: `docs/GUEST-FEATURES.md`.
 
 ## Validation status
 

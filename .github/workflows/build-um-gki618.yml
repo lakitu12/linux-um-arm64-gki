@@ -17,6 +17,10 @@ name: build-um-gki618
 # the next GKI drop that breaks the stack shows up as a red run carrying a
 # conflict report instead of silently rotting.
 #
+# Every build also merges the default guest feature set (docker / snap /
+# flatpak plus the Android guest gates — README, "Guest feature set") and
+# the assert step audits it symbol by symbol (ci/cfg-check.py).
+#
 # Runner note: this is a public repo, so GitHub-hosted runners --
 # including the arm64 one the boot job uses -- are free. run_boot=false
 # keeps a run artifact-only when needed. NDK pinned to r28c -- the
@@ -32,7 +36,7 @@ on:
         type: string
         default: "android17-6.18"
       extra_config:
-        description: "Extra kconfig fragments, space separated, paths relative to tools/um-arm64/ in the kernel tree. Empty = the validated default build."
+        description: "Extra kconfig fragments appended to the default guest feature set, space separated; paths relative to tools/um-arm64/ in the kernel tree."
         required: false
         type: string
         default: ""
@@ -139,20 +143,32 @@ jobs:
         working-directory: ${{ env.KERNEL_DIR }}/tools/um-arm64
         env:
           NDK: /home/runner/android-ndk
-          EXTRA_CONFIG: ${{ inputs.extra_config }}
           TREE: ${{ github.workspace }}/${{ env.KERNEL_DIR }}
           ART: ${{ github.workspace }}/artifacts
           O: ${{ runner.temp }}/um-gki618-build
         run: |
+          # The default guest feature set, merged into every build (README,
+          # "Guest feature set"): docker's requirements ship in the port as
+          # config/docker.config; the other three fragments live in ci/ and
+          # are copied in first, because build-bionic.sh resolves
+          # EXTRA_CONFIG relative to tools/um-arm64/.
+          cp "$GITHUB_WORKSPACE/ci/docker-completions.config" \
+             "$GITHUB_WORKSPACE/ci/snap-flatpak.config" \
+             "$GITHUB_WORKSPACE/ci/android-guest.config" config/
+          export EXTRA_CONFIG="config/docker.config config/docker-completions.config config/snap-flatpak.config config/android-guest.config"
           # 4 KB variant (pages4k=true): the port's default is 16 KB guest
           # pages.  The fragment lives in ci/ so the variant is one input
           # rather than a hand edit; build-bionic.sh merges it (EXTRA_CONFIG)
           # before olddefconfig, so its dependencies resolve.
           if [ "${{ github.event.inputs.pages4k }}" = "true" ]; then
             cp "$GITHUB_WORKSPACE/ci/page4k.config" config/page4k.config
-            export EXTRA_CONFIG="${EXTRA_CONFIG:+$EXTRA_CONFIG }config/page4k.config"
-            echo "4 KB variant: EXTRA_CONFIG=$EXTRA_CONFIG"
+            export EXTRA_CONFIG="$EXTRA_CONFIG config/page4k.config"
           fi
+          # extra_config appends to the defaults (last fragment wins a clash).
+          if [ -n "${{ inputs.extra_config }}" ]; then
+            export EXTRA_CONFIG="$EXTRA_CONFIG ${{ inputs.extra_config }}"
+          fi
+          echo "EXTRA_CONFIG=$EXTRA_CONFIG"
           # No ccache on purpose, same as build-uml-arm64-bionic.yml.
           bash harness/build-bionic.sh
         shell: bash
@@ -178,6 +194,32 @@ jobs:
             esac
             echo "config ok: $k"
           done
+          # The guest feature set must really be in the config — a fragment
+          # drop fails here, not on a device.  The curated keys are the
+          # headline features; cfg-check.py then re-audits EVERY request
+          # line of every default fragment, so a renamed or newly
+          # dependency-broken symbol fails with its name in the log.
+          for k in USER_NS PID_NS OVERLAY_FS SQUASHFS SQUASHFS_XZ SQUASHFS_ZSTD \
+                   FUSE_FS VETH BRIDGE NF_TABLES NFT_COMPAT NETFILTER_XT_MARK \
+                   IP_NF_TARGET_MASQUERADE IP6_NF_TARGET_MASQUERADE \
+                   SECCOMP_FILTER KEYS POSIX_MQUEUE BPF_SYSCALL CGROUP_BPF \
+                   MEMCG PSI EXT4_FS_POSIX_ACL BLK_DEV_LOOP IPV6 \
+                   NET_SCHED NET_CLS_CGROUP NFT_FIB_INET \
+                   FTRACE SCHED_TRACER EVENT_TRACING \
+                   ANDROID_BINDER_IPC ANDROID_BINDERFS; do
+            grep -E "^CONFIG_${k}=y$" "$CFG" >/dev/null \
+              || { echo "missing config: CONFIG_$k"; exit 1; }
+            echo "config ok: $k"
+          done
+          grep -F 'CONFIG_ANDROID_BINDER_DEVICES="binder,hwbinder,vndbinder"' "$CFG" >/dev/null \
+            || { echo "missing config: ANDROID_BINDER_DEVICES string"; exit 1; }
+          echo "config ok: ANDROID_BINDER_DEVICES"
+          python3 "$GITHUB_WORKSPACE/ci/cfg-check.py" "$CFG" \
+            "$KERNEL_DIR/tools/um-arm64/config/docker.config" \
+            "$KERNEL_DIR/tools/um-arm64/config/docker-completions.config" \
+            "$KERNEL_DIR/tools/um-arm64/config/snap-flatpak.config" \
+            "$KERNEL_DIR/tools/um-arm64/config/android-guest.config"
+
           # Symbols the late fixes/backports brought in must be in the image.
           # Write the nm output to a file first, then grep the file: piping
           # llvm-nm into `grep -q` exits grep at its first match, llvm-nm's
