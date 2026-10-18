@@ -1,0 +1,148 @@
+From 9111a7d7913443be033ff5f4ba7ff5249ec360e6 Mon Sep 17 00:00:00 2001
+From: lakitu12 <1219387824@qq.com>
+Date: Mon, 19 Oct 2026 01:00:43 +0800
+Subject: [PATCH] um: answer the VT ioctls on the stdio console (a guest X
+ server needs them)
+
+Xorg's xfree86 DDX refuses to start without a virtual terminal: before it
+touches the framebuffer it asks for a VT, activates it and waits for it to
+become active.  This console has no vt driver behind it, so those ioctls
+came back ENOTTY and the server died in parse_vt_settings() with
+
+    Cannot find a free VT: Inappropriate ioctl for device
+    Cannot find the current VT: Inappropriate ioctl for device  (-sharevts)
+
+Measured on marble (standard Debian 13 image, xserver 2:21.1.16, fbdev
+driver already matched and loaded): the default call, -keeptty,
+-keeptty -sharevts and -keeptty -novtswitch all died at that same point, so
+there is no option that talks the DDX out of it.
+
+For the guest this console *is* the one VT: it is tty0, it is active, and
+nothing competes for it.  Answer the VT ioctls accordingly (VT_OPENQRY -> 0,
+VT_GETSTATE -> VT 0 active and allocated, ACTIVATE/WAITACTIVE on 0 -> ok,
+GET/SETMODE, RELDISP, DISALLOCATE) and the keyboard ioctls Xorg also probes
+(KD*MODE, KD*LED) with what a bare framebuffer kiosk would answer.
+
+This is what makes a guest X server possible WITHOUT CONFIG_VT -- and
+CONFIG_VT must stay off: it takes major 4 away from this driver, which
+leaves the guest with no console tty devices at all (patch 0070 warns and
+keeps only the channels; run 39146286435 measured the consequence in a
+VT-built kernel: init's fd 1 is closed, EBADF, so userland can write to
+nothing but /dev/kmsg, and the app's conN=pts sessions have no tty devices).
+---
+ arch/um/drivers/stdio_console.c | 85 +++++++++++++++++++++++++++++++++
+ 1 file changed, 85 insertions(+)
+
+diff --git a/arch/um/drivers/stdio_console.c b/arch/um/drivers/stdio_console.c
+index e179888..4b9e7a2 100644
+--- a/arch/um/drivers/stdio_console.c
++++ b/arch/um/drivers/stdio_console.c
+@@ -17,6 +17,9 @@
+ #include <linux/interrupt.h>
+ #include <linux/slab.h>
+ #include <linux/hardirq.h>
++#include <linux/uaccess.h>
++#include <linux/vt.h>
++#include <linux/kd.h>
+ #include <asm/current.h>
+ #include <asm/irq.h>
+ #include "stdio_console.h"
+@@ -95,6 +98,87 @@ static int con_install(struct tty_driver *driver, struct tty_struct *tty)
+ 	return line_install(driver, tty, &vts[tty->index]);
+ }
+ 
++/*
++ * A guest X server on a console that is not a VT.
++ *
++ * Xorg's xfree86 DDX insists on a virtual terminal before it looks at the
++ * framebuffer: parse_vt_settings() VT_OPENQRY's a free one, VT_ACTIVATE's
++ * it and VT_WAITACTIVE's for it (with -sharevts it asks VT_GETSTATE for the
++ * current one instead).  This console has no vt driver behind it, so every
++ * one of those ioctls used to be ENOTTY and the server died with
++ *
++ *   Cannot find a free VT: Inappropriate ioctl for device
++ *   Cannot find the current VT: Inappropriate ioctl for device   (-sharevts)
++ *
++ * before it ever opened fb0 -- measured on marble with the standard Debian
++ * image and xserver 2:21.1.16, with and without -keeptty, -sharevts and
++ * -novtswitch (all four combinations died in the same place; the fbdev
++ * driver itself had already been matched and loaded).
++ *
++ * For the guest this console IS the one VT: it is tty0, it is active, and
++ * nothing else competes for it.  Answering the VT ioctls is what lets a
++ * guest X server run while CONFIG_VT stays off -- which is the whole point,
++ * because CONFIG_VT takes major 4 away from this driver and with it every
++ * tty device the guest has (patch 0070, and run 39146286435 where a VT
++ * kernel boots with init's fd 1 closed).
++ *
++ * The keyboard answers are the ones a kiosk on a bare framebuffer gives:
++ * UML has no keyboard (input arrives over the console channel), so "raw
++ * mode, no LEDs, text mode" plus accepting the setters is all there is.
++ */
++static int con_ioctl(struct tty_struct *tty, unsigned int cmd, unsigned long arg)
++{
++	void __user *up = (void __user *)arg;
++	struct vt_mode vtm;
++	struct vt_stat vst;
++	int v = 0;
++
++	switch (cmd) {
++	case VT_OPENQRY:
++		return copy_to_user(up, &v, sizeof(v)) ? -EFAULT : 0;
++
++	case VT_GETSTATE:
++		vst.v_active = 0;
++		vst.v_signal = 0;
++		vst.v_state = 1;	/* bit 0: VT 0 is allocated */
++		return copy_to_user(up, &vst, sizeof(vst)) ? -EFAULT : 0;
++
++	case VT_ACTIVATE:
++	case VT_WAITACTIVE:
++		return arg == 0 ? 0 : -EINVAL;
++
++	case VT_GETMODE:
++		vtm.mode = VT_AUTO;
++		vtm.waitv = 0;
++		vtm.relsig = 0;
++		vtm.acqsig = 0;
++		return copy_to_user(up, &vtm, sizeof(vtm)) ? -EFAULT : 0;
++
++	/* Accept the mode but keep behaving as VT_AUTO: there is no VT
++	 * multiplexer here to take part in the VT_PROCESS handshake. */
++	case VT_SETMODE:
++		return copy_from_user(&vtm, up, sizeof(vtm)) ? -EFAULT : 0;
++
++	case VT_RELDISP:
++		return 0;
++
++	case VT_DISALLOCATE:
++		return arg == 0 ? 0 : -EINVAL;
++
++	case KDGKBMODE:
++	case KDGKBLED:
++	case KDGETMODE:
++		return copy_to_user(up, &v, sizeof(v)) ? -EFAULT : 0;
++
++	case KDSKBMODE:
++	case KDSKBLED:
++	case KDSETMODE:
++		return 0;
++	}
++
++	return -ENOIOCTLCMD;
++}
++
+ static const struct tty_operations console_ops = {
+ 	.open 	 		= line_open,
+ 	.install		= con_install,
+@@ -107,6 +191,7 @@ static const struct tty_operations console_ops = {
+ 	.throttle 		= line_throttle,
+ 	.unthrottle 		= line_unthrottle,
+ 	.hangup			= line_hangup,
++	.ioctl			= con_ioctl,
+ };
+ 
+ static void uml_console_write(struct console *console, const char *string,
+-- 
+2.53.0
+
