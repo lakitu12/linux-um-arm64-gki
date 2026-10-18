@@ -324,11 +324,21 @@ static int __init parse_host_cpu_line(char *line)
  * allocate bionic_tls") before printing anything. The value is authoritative
  * when present; the stack heuristic below stays as the fallback for a plain
  * `exec` of the kernel binary.
+ *
+ * The 0x/0X prefix is optional. It has to be: the app's loader prints the
+ * value with the very same %#x-style hex helper it logs addresses with, and
+ * a parser that took bare hex only turned the override into a silent no-op —
+ * the kernel went back to the stack heuristic and died in bionic startup
+ * again, which reads exactly like the bug this variable exists to prevent.
+ * Accept both forms rather than depend on which producer is in use.
  */
 static int __init parse_host_top(char *s, unsigned long *out)
 {
 	unsigned long v = 0;
 	int n = 0;
+
+	if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))
+		s += 2;
 
 	while (*s) {
 		char c = *s++;
