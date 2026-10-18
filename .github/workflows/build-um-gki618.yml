@@ -153,13 +153,14 @@ jobs:
         run: |
           # The default guest feature set, merged into every build (README,
           # "Guest feature set"): docker's requirements ship in the port as
-          # config/docker.config; the other three fragments live in ci/ and
-          # are copied in first, because build-bionic.sh resolves
-          # EXTRA_CONFIG relative to tools/um-arm64/.
+          # config/docker.config; the other fragments live in ci/ and are
+          # copied in first, because build-bionic.sh resolves EXTRA_CONFIG
+          # relative to tools/um-arm64/.
           cp "$GITHUB_WORKSPACE/ci/docker-completions.config" \
              "$GITHUB_WORKSPACE/ci/snap-flatpak.config" \
-             "$GITHUB_WORKSPACE/ci/android-guest.config" config/
-          export EXTRA_CONFIG="config/docker.config config/docker-completions.config config/snap-flatpak.config config/android-guest.config"
+             "$GITHUB_WORKSPACE/ci/android-guest.config" \
+             "$GITHUB_WORKSPACE/ci/umfb.config" config/
+          export EXTRA_CONFIG="config/docker.config config/docker-completions.config config/snap-flatpak.config config/android-guest.config config/umfb.config"
           # 4 KB variant (pages4k=true): the port's default is 16 KB guest
           # pages.  The fragment lives in ci/ so the variant is one input
           # rather than a hand edit; build-bionic.sh merges it (EXTRA_CONFIG)
@@ -210,7 +211,7 @@ jobs:
                    MEMCG PSI EXT4_FS_POSIX_ACL BLK_DEV_LOOP IPV6 \
                    NET_SCHED NET_CLS_CGROUP NFT_FIB_INET \
                    FTRACE SCHED_TRACER EVENT_TRACING \
-                   ANDROID_BINDER_IPC ANDROID_BINDERFS; do
+                   ANDROID_BINDER_IPC ANDROID_BINDERFS UML_FB FB; do
             grep -E "^CONFIG_${k}=y$" "$CFG" >/dev/null \
               || { echo "missing config: CONFIG_$k"; exit 1; }
             echo "config ok: $k"
@@ -222,7 +223,8 @@ jobs:
             "$KERNEL_DIR/tools/um-arm64/config/docker.config" \
             "$KERNEL_DIR/tools/um-arm64/config/docker-completions.config" \
             "$KERNEL_DIR/tools/um-arm64/config/snap-flatpak.config" \
-            "$KERNEL_DIR/tools/um-arm64/config/android-guest.config"
+            "$KERNEL_DIR/tools/um-arm64/config/android-guest.config" \
+            "$KERNEL_DIR/tools/um-arm64/config/umfb.config"
 
           # Symbols the late fixes/backports brought in must be in the image.
           # Write the nm output to a file first, then grep the file: piping
@@ -323,6 +325,12 @@ jobs:
           bash ci/qcow2-gate.sh ci-artifacts/artifacts/linux-bionic boot-out-qcow2 | tee boot-out-qcow2/summary.txt
         shell: bash
 
+      - name: UM framebuffer gate
+        run: |
+          mkdir -p boot-out-umfb
+          bash ci/umfb-gate.sh ci-artifacts/artifacts/linux-bionic boot-out-umfb | tee boot-out-umfb/summary.txt
+        shell: bash
+
       - name: Upload boot log
         if: always()
         uses: actions/upload-artifact@v4
@@ -343,4 +351,20 @@ jobs:
             boot-out-qcow2/boot.log
             boot-out-qcow2/summary.txt
             boot-out-qcow2/verdict.txt
+          if-no-files-found: warn
+
+      - name: Upload umfb gate log
+        # fb.raw is the evidence the verdict was computed on (~257 KB):
+        # the sink header the kernel published plus the bytes the guest
+        # wrote, exactly what every viewer consumes.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: um-gki618-umfb-boot${{ env.PAGE_SUFFIX }}-${{ github.run_number }}
+          path: |
+            boot-out-umfb/boot.log
+            boot-out-umfb/summary.txt
+            boot-out-umfb/verdict.txt
+            boot-out-umfb/check.txt
+            boot-out-umfb/fb.raw
           if-no-files-found: warn

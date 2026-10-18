@@ -1,0 +1,51 @@
+From 39b670bde1fe5440afee99fb161ef2f3a89ead7d Mon Sep 17 00:00:00 2001
+From: lakitu12 <1219387824@qq.com>
+Date: Sun, 18 Oct 2026 18:55:49 +0800
+Subject: [PATCH] um: no port I/O means no HAS_IOPORT_MAP (clang build fix)
+
+With UML_IOMEM_EMULATION on, HAS_IOMEM turns on, and HAS_IOPORT_MAP
+(default y under HAS_IOMEM) follows -- which compiles the generic
+ioport_map() in asm-generic/io.h.  UML never defines PCI_IOBASE, so it
+defaults to a null pointer, and clang's -Wnull-pointer-arithmetic (an
+error in kernel builds) stops the build at the first translation unit
+that includes linux/io.h:
+
+  include/asm-generic/io.h:1209: error: performing pointer arithmetic
+  on a null pointer has undefined behavior [-Werror,-Wnull-pointer-arithmetic]
+        return (port > MMIO_UPPER_LIMIT) ? NULL : PCI_IOBASE + port;
+
+UML has no port I/O, so it should not claim ioport_map() either; say so
+in Kconfig the way s390 and xtensa do.  The UM list reached the same
+conclusion for the same warning when the SMP series enabled the
+emulation in a clang build (Tiwei Bie's "um: Turn HAS_IOPORT_MAP off",
+refined toward the generic fix by Arnd).
+
+Found building this stack with NDK r28c once the display sink's
+fragment (UML_IOMEM_EMULATION behind umfb) enabled the emulation in a
+clang build; the 7.2 tree carries the same latent warning.
+---
+ arch/um/Kconfig | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/arch/um/Kconfig b/arch/um/Kconfig
+index fa2870c..a359721 100644
+--- a/arch/um/Kconfig
++++ b/arch/um/Kconfig
+@@ -110,6 +110,14 @@ config UML_IOMEM_EMULATION
+ 	  enabling UML_PCI to reach it warns at boot that no virtio device ID
+ 	  is configured. Say Y to get the accessors on their own.
+ 
++# UML has no port I/O, so it must not carry ioport_map() either: with
++# UML_IOMEM_EMULATION on (HAS_IOMEM on), HAS_IOPORT_MAP would default to
++# y and the generic ioport_map() -- PCI_IOBASE defaults to a null pointer
++# here -- trips clang's -Wnull-pointer-arithmetic, which is fatal in
++# kernel builds.  Same shape as s390's NO_IOPORT_MAP.
++config NO_IOPORT_MAP
++	def_bool y
++
+ config ISA
+ 	bool
+ 
+-- 
+2.53.0
+

@@ -17,17 +17,25 @@ either build and a 16 KB host needs the 16 KB one.  Root disks may be raw
 ext4 or **qcow2** (the stack carries an in-kernel qcow2 engine for the ubd
 backend, `0061–0063`).
 
+The guest's screen can leave the VM as well: **umfb** (`0065–0067`) mirrors
+`/dev/fb0` into a host file or fd that viewers map — `tools/um-arm64/umview`
+on a Linux desktop (X11 and Wayland sessions alike), the console app's
+display screen on Android.
+
 ## Layout
 
-- `patches/` — the 63-patch stack; `git am` in order onto `android17-6.18`.
+- `patches/` — the 67-patch stack; `git am` in order onto `android17-6.18`.
   49 upstream-port patches (original authors/dates kept), 3 Android guest
-  fixes, 8 backports/build fixes, 3 qcow2-engine patches — the why of each
-  is in `docs/fixlog.md`.
+  fixes, 8 backports/build fixes, 3 qcow2-engine patches, the loader/multi-
+  session fix (`0064`) and the display set (`0065–0067`, umfb + umview) —
+  the why of each is in `docs/fixlog.md`.
 - `ci/` — `apply-stack.sh` (stops on conflict, leaves a report),
   `boot-gate.sh` + `init.c` (tiny static initramfs, marker verdict),
+  `qcow2-gate.sh` (qcow2 root-disk boot), `umfb-gate.sh` + `umfb-init.c` +
+  `umfb-check.py` (display sink: the verdict is the sink file itself),
   `cfg-check.py` (per-symbol fragment audit), and the kconfig fragments this
   repo adds on top of the port's (`page4k`, `docker-completions`,
-  `snap-flatpak`, `android-guest`).
+  `snap-flatpak`, `android-guest`, `umfb`).
 - `.github/workflows/build-um-gki618.yml` — apply → build → boot; the
   scheduled run re-tests the stack against the branch tip monthly, so a GKI
   drift shows up as a red run carrying a conflict report.
@@ -94,6 +102,7 @@ carries the guests' feature set without a dispatch input:
 | `ci/docker-completions.config` | companions so none of the port's requests silently drops (`NET_SCHED`, `NFT_FIB_IPV6`) | completeness |
 | `ci/snap-flatpak.config` | squashfs (+ zlib/lzo/xz/zstd, xattr) for snap; `FUSE_FS` for flatpak's portals (also the Android sdcard daemon) | snap, flatpak, Android |
 | `ci/android-guest.config` | binder + the `FTRACE`/`SCHED_TRACER` pair that brings `EVENT_TRACING` on, `PSI`, netd's remaining netfilter faces | redroid-class Android guests |
+| `ci/umfb.config` | the display sink: `FB`/`FB_DEVICE` behind `UML_IOMEM_EMULATION`, plus `UML_FB` (dormant unless `umlfb=` is on the guest command line) | Linux guests (Xorg/weston on fbdev), Android guests (SurfaceFlinger/gralloc), the app's display screen |
 
 The assert step audits all of it: a curated key list plus `ci/cfg-check.py`
 over every request line of every fragment — a renamed or dependency-broken
