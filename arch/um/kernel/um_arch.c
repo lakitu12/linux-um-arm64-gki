@@ -313,10 +313,68 @@ static int __init parse_host_cpu_line(char *line)
  */
 #define UM_ADDR_TAG_MASK	((1UL << 56) - 1)
 
+/*
+ * UML_HOST_TOP=<hex> — the user address-space top as the LOADER knows it.
+ *
+ * Who synthesizes the initial stack also knows where the address space ends;
+ * deriving the top from where the stack happens to sit is off by a page as
+ * soon as one more word joins the command line. Measured on the app's loader:
+ * a 4-byte extra argument moved guest TASK_SIZE and the stub placement by
+ * 4 KB, and the kernel then died in its own bionic startup ("failed to
+ * allocate bionic_tls") before printing anything. The value is authoritative
+ * when present; the stack heuristic below stays as the fallback for a plain
+ * `exec` of the kernel binary.
+ */
+static int __init parse_host_top(char *s, unsigned long *out)
+{
+	unsigned long v = 0;
+	int n = 0;
+
+	while (*s) {
+		char c = *s++;
+		unsigned int d;
+
+		if (c >= '0' && c <= '9')
+			d = c - '0';
+		else if (c >= 'a' && c <= 'f')
+			d = c - 'a' + 10;
+		else if (c >= 'A' && c <= 'F')
+			d = c - 'A' + 10;
+		else
+			return 0;
+		if (++n > 16)
+			return 0;
+		v = (v << 4) | d;
+	}
+
+	if (!n || !v)
+		return 0;
+	*out = v;
+	return 1;
+}
+
 static unsigned long __init get_top_address(char **envp)
 {
 	unsigned long top_addr = (unsigned long) &top_addr & UM_ADDR_TAG_MASK;
 	int i;
+
+	for (i = 0; envp[i]; i++) {
+		static const char key[] = "UML_HOST_TOP=";
+		const char *e = envp[i];
+		int k = 0;
+		unsigned long v;
+
+		while (key[k] && e[k] == key[k])
+			k++;
+		if (key[k])
+			continue;
+		if (parse_host_top((char *)e + k, &v)) {
+			v &= UM_ADDR_TAG_MASK;
+			v &= ~(UM_KERN_PAGE_SIZE - 1);
+			if (v)
+				return v;
+		}
+	}
 
 	/* The earliest variable should be after the program name in ELF */
 	for (i = 0; envp[i]; i++) {
