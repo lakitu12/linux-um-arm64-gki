@@ -1,0 +1,55 @@
+From 7bbe9f6cb34e73faf7ca8725f85ae0f38343a923 Mon Sep 17 00:00:00 2001
+From: lakitu12 <1219387824@qq.com>
+Date: Sun, 18 Oct 2026 23:07:03 +0800
+Subject: [PATCH] um: accept 0x/0X in UML_HOST_TOP
+
+The loader that synthesizes the kernel's initial stack prints addresses with
+a %#x-style helper, so it hands the top over as UML_HOST_TOP=0x8000000000.
+parse_host_top() took bare hex only: the 'x' failed the digit test and the
+override became a silent no-op, sending the kernel back to the stack-derived
+guess. With the app's environment one word larger that guess moved a page,
+the stub placement moved with it, and bionic's own startup died in mmap
+("failed to allocate bionic_tls") before the kernel printed anything -- the
+exact failure this variable was added to prevent.
+
+Accept the prefix when it is present instead of depending on which producer
+is in use (bare hex keeps working; the loader still prints 0x).
+
+Measured on marble (4 KB guest pages, app loader): with the prefix rejected,
+kernel 4k-ht dies with bionic_tls before its first print; with the value
+parsed, the same image boots to the guest's init (env, auxv, TMPDIR and
+TASK_SIZE all correct).
+---
+ arch/um/kernel/um_arch.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/arch/um/kernel/um_arch.c b/arch/um/kernel/um_arch.c
+index a84c450..cee30fc 100644
+--- a/arch/um/kernel/um_arch.c
++++ b/arch/um/kernel/um_arch.c
+@@ -324,12 +324,22 @@ static int __init parse_host_cpu_line(char *line)
+  * allocate bionic_tls") before printing anything. The value is authoritative
+  * when present; the stack heuristic below stays as the fallback for a plain
+  * `exec` of the kernel binary.
++ *
++ * The 0x/0X prefix is optional. It has to be: the app's loader prints the
++ * value with the very same %#x-style hex helper it logs addresses with, and
++ * a parser that took bare hex only turned the override into a silent no-op —
++ * the kernel went back to the stack heuristic and died in bionic startup
++ * again, which reads exactly like the bug this variable exists to prevent.
++ * Accept both forms rather than depend on which producer is in use.
+  */
+ static int __init parse_host_top(char *s, unsigned long *out)
+ {
+ 	unsigned long v = 0;
+ 	int n = 0;
+ 
++	if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))
++		s += 2;
++
+ 	while (*s) {
+ 		char c = *s++;
+ 		unsigned int d;
+-- 
+2.53.0
+

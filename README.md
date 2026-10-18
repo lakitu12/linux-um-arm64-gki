@@ -24,14 +24,16 @@ display screen on Android.
 
 ## Layout
 
-- `patches/` — the 69-patch stack; `git am` in order onto `android17-6.18`.
+- `patches/` — the 71-patch stack; `git am` in order onto `android17-6.18`.
   49 upstream-port patches (original authors/dates kept), 3 Android guest
   fixes, 8 backports/build fixes, 3 qcow2-engine patches, the loader/multi-
   session fix (`0064`), the display set (`0065–0067`, umfb + umview —
   `0069` puts the framebuffer under a platform device so Xorg's fbdev
-  probe accepts it) and the VT coexistence fix (`0070`: keep the stdio
-  console when CONFIG_VT owns the tty device space) — the why of each
-  is in `docs/fixlog.md`.
+  probe accepts it), the VT coexistence fix (`0070`: keep the stdio
+  console when CONFIG_VT owns the tty device space) and the `UML_HOST_TOP`
+  parse fix (`0071`: take the `0x` prefix the loader prints — without it the
+  override was a silent no-op and the kernel fell back to its stack-derived
+  guess) — the why of each is in `docs/fixlog.md`.
 - `ci/` — `apply-stack.sh` (stops on conflict, leaves a report),
   `boot-gate.sh` + `init.c` (tiny static initramfs, marker verdict),
   `qcow2-gate.sh` (qcow2 root-disk boot), `umfb-gate.sh` + `umfb-init.c` +
@@ -114,7 +116,7 @@ per-fragment depth, and in-guest verification recipes: `docs/GUEST-FEATURES.md`.
 
 ## Validation status
 
-- Baseline `android17-6.18` @ **6.18.32**; the stack applies 70/70 and the
+- Baseline `android17-6.18` @ **6.18.32**; the stack applies 71/71 and the
   bionic build is green with NDK **r28c** (upstream references r27c; r28c
   turns on extra warning flags, and the stack is fixed up for them).
 - Reference artifacts: `linux-bionic` sha256 `03c3ef3b…a9410c`,
