@@ -1,0 +1,234 @@
+From ece1d404b856b028d67644a24ba6f0f7206b3c98 Mon Sep 17 00:00:00 2001
+From: lakitu12 <1219387824@qq.com>
+Date: Sun, 18 Oct 2026 11:52:47 +0800
+Subject: [PATCH] um: take the address-space top from UML_HOST_TOP when the
+ loader provides it
+
+---
+ arch/um/kernel/um_arch.c                      | 58 +++++++++++++++++++
+ tools/um-arm64/config/android-guest.config    | 44 ++++++++++++++
+ .../um-arm64/config/docker-completions.config | 24 ++++++++
+ tools/um-arm64/config/page4k.config           | 16 +++++
+ tools/um-arm64/config/snap-flatpak.config     | 28 +++++++++
+ 5 files changed, 170 insertions(+)
+ create mode 100644 tools/um-arm64/config/android-guest.config
+ create mode 100644 tools/um-arm64/config/docker-completions.config
+ create mode 100644 tools/um-arm64/config/page4k.config
+ create mode 100644 tools/um-arm64/config/snap-flatpak.config
+
+diff --git a/arch/um/kernel/um_arch.c b/arch/um/kernel/um_arch.c
+index a8af1aa..a84c450 100644
+--- a/arch/um/kernel/um_arch.c
++++ b/arch/um/kernel/um_arch.c
+@@ -313,11 +313,69 @@ static int __init parse_host_cpu_line(char *line)
+  */
+ #define UM_ADDR_TAG_MASK	((1UL << 56) - 1)
+ 
++/*
++ * UML_HOST_TOP=<hex> — the user address-space top as the LOADER knows it.
++ *
++ * Who synthesizes the initial stack also knows where the address space ends;
++ * deriving the top from where the stack happens to sit is off by a page as
++ * soon as one more word joins the command line. Measured on the app's loader:
++ * a 4-byte extra argument moved guest TASK_SIZE and the stub placement by
++ * 4 KB, and the kernel then died in its own bionic startup ("failed to
++ * allocate bionic_tls") before printing anything. The value is authoritative
++ * when present; the stack heuristic below stays as the fallback for a plain
++ * `exec` of the kernel binary.
++ */
++static int __init parse_host_top(char *s, unsigned long *out)
++{
++	unsigned long v = 0;
++	int n = 0;
++
++	while (*s) {
++		char c = *s++;
++		unsigned int d;
++
++		if (c >= '0' && c <= '9')
++			d = c - '0';
++		else if (c >= 'a' && c <= 'f')
++			d = c - 'a' + 10;
++		else if (c >= 'A' && c <= 'F')
++			d = c - 'A' + 10;
++		else
++			return 0;
++		if (++n > 16)
++			return 0;
++		v = (v << 4) | d;
++	}
++
++	if (!n || !v)
++		return 0;
++	*out = v;
++	return 1;
++}
++
+ static unsigned long __init get_top_address(char **envp)
+ {
+ 	unsigned long top_addr = (unsigned long) &top_addr & UM_ADDR_TAG_MASK;
+ 	int i;
+ 
++	for (i = 0; envp[i]; i++) {
++		static const char key[] = "UML_HOST_TOP=";
++		const char *e = envp[i];
++		int k = 0;
++		unsigned long v;
++
++		while (key[k] && e[k] == key[k])
++			k++;
++		if (key[k])
++			continue;
++		if (parse_host_top((char *)e + k, &v)) {
++			v &= UM_ADDR_TAG_MASK;
++			v &= ~(UM_KERN_PAGE_SIZE - 1);
++			if (v)
++				return v;
++		}
++	}
++
+ 	/* The earliest variable should be after the program name in ELF */
+ 	for (i = 0; envp[i]; i++) {
+ 		unsigned long e = (unsigned long) envp[i] & UM_ADDR_TAG_MASK;
+diff --git a/tools/um-arm64/config/android-guest.config b/tools/um-arm64/config/android-guest.config
+new file mode 100644
+index 0000000..82e1371
+--- /dev/null
++++ b/tools/um-arm64/config/android-guest.config
+@@ -0,0 +1,44 @@
++# Android (redroid-class) guests: the gates config/docker.config does not cover.
++#
++# The GKI counterpart of the fragments the 7.2 tree carries for the same
++# workload (redroid/netfilter in the app repository); every entry below was
++# a measured boot gate there.  What is NOT repeated here is already in
++# config/docker.config, which the default build merges:
++#
++#   bpfloader       -> BPF_SYSCALL / CGROUP_BPF
++#   lmkd            -> MEMCG (PSI is added below)
++#   vold user data  -> EXT4_FS_POSIX_ACL / EXT4_FS_SECURITY
++#   netd            -> the full netfilter/nftables/xtables set
++#   sdcard daemon   -> FUSE_FS (in ci/snap-flatpak.config)
++#   overlayfs, seccomp, keys, POSIX mqueues ... likewise
++#
++# binder: what Android cannot boot without.  binderfs (Android 12+) gives a
++# per-guest /dev/binder, which matters when two VMs share one host kernel.
++CONFIG_ANDROID_BINDER_IPC=y
++CONFIG_ANDROID_BINDERFS=y
++CONFIG_ANDROID_BINDER_DEVICES="binder,hwbinder,vndbinder"
++#
++# ...and binder's own new prerequisite in this tree: ANDROID_BINDER_IPC
++# carries "depends on EVENT_TRACING" here (the 7.2 tree does not), so the
++# tracing core must exist before the symbol is even visible.  FTRACE opens
++# the Tracers menu, and one tracer selects GENERIC_TRACER -> TRACING ->
++# EVENT_TRACING; SCHED_TRACER is the lightest of them.  Both lines are
++# load-bearing — measured: drop the tracer and binder drops with it; drop
++# FTRACE and the tracer has nowhere to live.  Guests get a working tracing
++# subsystem out of it as a side effect.
++CONFIG_FTRACE=y
++CONFIG_SCHED_TRACER=y
++#
++# lmkd again: boot-critical, exits at startup without a pressure source and
++# init's onrestart chain takes zygote down with it.  PSI is the modern source
++# (/proc/pressure/memory); the memcg v1 fallback comes from docker.config.
++CONFIG_PSI=y
++#
++# netd's last kernel faces beyond the docker set: the xt owner/socket matches
++# its chains use, and socket lookup for both address families.  (The MARK
++# target+match rides in docker.config as NETFILTER_XT_MARK — the combined
++# module that NETFILTER_XT_TARGET_MARK only selects.)
++CONFIG_NETFILTER_XT_MATCH_OWNER=y
++CONFIG_NETFILTER_XT_MATCH_SOCKET=y
++CONFIG_NF_SOCKET_IPV4=y
++CONFIG_NF_SOCKET_IPV6=y
+\ No newline at end of file
+diff --git a/tools/um-arm64/config/docker-completions.config b/tools/um-arm64/config/docker-completions.config
+new file mode 100644
+index 0000000..54c8179
+--- /dev/null
++++ b/tools/um-arm64/config/docker-completions.config
+@@ -0,0 +1,24 @@
++# Completing config/docker.config's requests.
++#
++# config/docker.config is part of the port's patch stack and is merged
++# verbatim; a few of its lines cannot land as written on this tree because
++# the symbol they configure needs a companion the file does not set — and
++# olddefconfig then drops the request SILENTLY (no "# ... is not set"
++# marker; the line simply vanishes from the .config, and only a strict
++# per-symbol audit like ci/cfg-check.py sees it).  One companion per line:
++#
++#   NET_CLS_CGROUP -> needs NET_SCHED.  net/sched/Kconfig gates the whole
++#     classifier menu behind `menuconfig NET_SCHED`; with it off the symbol
++#     is invisible and the request drops.  (Optional tier for docker.
++#     NET_SCHED itself is the standard "QoS and/or fair queueing" switch
++#     every general-purpose kernel ships.)
++#   NFT_FIB_INET   -> needs NFT_FIB_IPV6.  Its Kconfig is
++#     `depends on NF_TABLES_INET && NFT_FIB_IPV4 && NFT_FIB_IPV6`, and
++#     docker.config sets the IPv4 variant only, so the inet one dropped.
++#
++# Kept out of config/ so the port's file stays byte-identical to the stack;
++# delete a line here the day the port's fragment grows the companion itself
++# (cfg-check.py will keep passing either way).
++CONFIG_NET_SCHED=y
++CONFIG_NET_CLS_CGROUP=y
++CONFIG_NFT_FIB_IPV6=y
+\ No newline at end of file
+diff --git a/tools/um-arm64/config/page4k.config b/tools/um-arm64/config/page4k.config
+new file mode 100644
+index 0000000..cefddef
+--- /dev/null
++++ b/tools/um-arm64/config/page4k.config
+@@ -0,0 +1,16 @@
++# 4 KB guest pages — the variant for a 4 KB-page guest userland.
++#
++# The port defaults to 16 KB (see patches/0025): Android 15+ hosts are 16 KB
++# and a guest page can never be smaller than the host's.  A 4 KB guest is what
++# you want when the HOST is 4 KB and the guest userland assumes 4 KB arena
++# alignment — Debian/Ubuntu arm64 images, older Android system images (a
++# redroid linker64 dies inside its first init path on a 16 KB guest, measured
++# on a 4 KB host).
++#
++# Do NOT run this artifact on a 16 KB host: the kernel refuses at boot
++# (os_early_checks) because guest >= host is a hard requirement.  Equal-or-
++# larger host pages are fine: one guest page is then one host mmap().
++#
++# merge_config semantics: "# CONFIG_X is not set" is the disable line.
++# CONFIG_PAGE_SIZE_16KB is not set
++CONFIG_PAGE_SIZE_4KB=y
+diff --git a/tools/um-arm64/config/snap-flatpak.config b/tools/um-arm64/config/snap-flatpak.config
+new file mode 100644
+index 0000000..c562d38
+--- /dev/null
++++ b/tools/um-arm64/config/snap-flatpak.config
+@@ -0,0 +1,28 @@
++# Snap and Flatpak: what they need that the docker fragment does not carry.
++#
++# The default build merges four fragments — the port's config/docker.config,
++# its companion ci/docker-completions.config, this file, and
++# ci/android-guest.config (see README, "Guest feature set").
++# This file deliberately carries ONLY what docker.config does not already
++# provide, so the merged .config diffs back to exactly one file per topic.
++#
++# Snap: the store distributes applications as read-only squashfs images that
++# snapd loop-mounts (CONFIG_BLK_DEV_LOOP is already on in the UML defconfig;
++# the filesystem is not).  Any of the compressors below can be what a given
++# snap was built with, so all of them are on — a missing one fails at mount
++# time with "wrong fs type", which names neither the snap nor the compressor.
++CONFIG_SQUASHFS=y
++CONFIG_SQUASHFS_ZLIB=y
++CONFIG_SQUASHFS_LZO=y
++CONFIG_SQUASHFS_XZ=y
++CONFIG_SQUASHFS_ZSTD=y
++# Extended attributes ride in squashfs images built on xattr-enabled systems
++# (security.selinux labels, file capabilities); cheap, keep on.
++CONFIG_SQUASHFS_XATTR=y
++#
++# Flatpak: every "flatpak run" goes through bubblewrap, and bubblewrap's
++# sandbox is user namespaces plus seccomp — both already in docker.config.
++# What flatpak adds here is FUSE: the document and revoke portals are FUSE
++# filesystems, so /dev/fuse must exist.  (Same driver the Android guests
++# need — init's sdcard daemon is one too — so it lives here, one home.)
++CONFIG_FUSE_FS=y
+\ No newline at end of file
+-- 
+2.53.0
+
