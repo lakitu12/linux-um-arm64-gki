@@ -1,0 +1,102 @@
+From 11284f3129fe3531a7928e34ef146935356b8ba3 Mon Sep 17 00:00:00 2001
+From: lakitu12 <1219387824@qq.com>
+Date: Sun, 18 Oct 2026 20:04:01 +0800
+Subject: [PATCH 1/2] um: umfb: register under a platform device (Xorg's fbdev
+ probe needs it)
+
+Xorg's fbdev driver (fbdevhw.c, fbdev_open()) silently refuses any
+framebuffer whose /sys/class/graphics/fbN/device/subsystem is missing
+or points at a PCI bus ("only touch non-PCI devices on this path"),
+and a parentless virtual fb -- framebuffer_alloc(size, NULL) -- has
+no such sysfs link at all.  The driver then never ioctls the device:
+the probe returns FALSE without a single message and the server dies
+with "No devices detected".
+
+Register the framebuffer under a simple platform device instead, the
+same shape other virtual fb drivers use; the sysfs link then exists
+and reads "bus/platform".  Found end-to-end: a Debian guest's Xorg
+now starts on umfb and its fbdev driver reaches
+FBIOGET_FSCREENINFO/FBIOPUT_VSCREENINFO/FBIOPAN_DISPLAY normally
+(verified with strace in the guest and a 1024x768 screenshot rendered
+by umview out of the sink).
+---
+ arch/um/drivers/umfb_kern.c | 26 +++++++++++++++++++++++++-
+ 1 file changed, 25 insertions(+), 1 deletion(-)
+
+diff --git a/arch/um/drivers/umfb_kern.c b/arch/um/drivers/umfb_kern.c
+index 2d67303..d1c29f2 100644
+--- a/arch/um/drivers/umfb_kern.c
++++ b/arch/um/drivers/umfb_kern.c
+@@ -44,6 +44,7 @@
+ #include <linux/mm.h>
+ #include <linux/fb.h>
+ #include <linux/slab.h>
++#include <linux/platform_device.h>
+ 
+ #include <init.h>
+ #include <os.h>
+@@ -203,6 +204,7 @@ static struct os_helper_thread *umfb_pump_td;
+ static unsigned char *umfb_mem;		/* the guest-visible pixels */
+ static void *umfb_map;			/* the sink's mapping */
+ static struct fb_info *umfb_info;
++static struct platform_device *umfb_pdev;
+ static int umfb_fd = -1;
+ 
+ static int umfb_check_var(struct fb_var_screeninfo *var, struct fb_info *info)
+@@ -378,9 +380,25 @@ static int __init umfb_init(void)
+ 	h->full = 1;
+ 	h->seq = 0;
+ 
+-	umfb_info = framebuffer_alloc(sizeof(u32) * 256, NULL);
++	/*
++	 * Register under a platform device: Xorg's fbdev driver refuses
++	 * framebuffers whose /sys/class/graphics/fbN/device/subsystem is
++	 * missing or PCI ("only touch non-PCI devices on this path",
++	 * fbdevhw.c), and a parentless virtual fb has no such link at
++	 * all -- the probe then fails without a single message.
++	 */
++	umfb_pdev = platform_device_register_simple("umfb", 0, NULL, 0);
++	if (IS_ERR(umfb_pdev)) {
++		err = PTR_ERR(umfb_pdev);
++		umfb_pdev = NULL;
++		return err;
++	}
++
++	umfb_info = framebuffer_alloc(sizeof(u32) * 256, &umfb_pdev->dev);
+ 	if (!umfb_info) {
+ 		printk(KERN_ERR "umfb: framebuffer_alloc failed\n");
++		platform_device_unregister(umfb_pdev);
++		umfb_pdev = NULL;
+ 		return -ENOMEM;
+ 	}
+ 	umfb_info->flags |= FBINFO_VIRTFB;
+@@ -405,6 +423,8 @@ static int __init umfb_init(void)
+ 	err = fb_alloc_cmap(&umfb_info->cmap, 256, 0);
+ 	if (err) {
+ 		framebuffer_release(umfb_info);
++		platform_device_unregister(umfb_pdev);
++		umfb_pdev = NULL;
+ 		return err;
+ 	}
+ 
+@@ -413,6 +433,8 @@ static int __init umfb_init(void)
+ 		printk(KERN_ERR "umfb: register_framebuffer failed: %d\n", err);
+ 		fb_dealloc_cmap(&umfb_info->cmap);
+ 		framebuffer_release(umfb_info);
++		platform_device_unregister(umfb_pdev);
++		umfb_pdev = NULL;
+ 		return err;
+ 	}
+ 
+@@ -435,6 +457,8 @@ static int __init umfb_init(void)
+ 		unregister_framebuffer(umfb_info);
+ 		fb_dealloc_cmap(&umfb_info->cmap);
+ 		framebuffer_release(umfb_info);
++		platform_device_unregister(umfb_pdev);
++		umfb_pdev = NULL;
+ 		return err;
+ 	}
+ 
+-- 
+2.53.0
+

@@ -78,3 +78,20 @@
   raw 逐字节相等；四组夹具含压缩/普通/4K 簇空盘跨 refcount 块分配）。
 - CI 新增 `ci/qcow2-gate.sh`：ext4 根盘转 qcow2 以 ubd0 引导；判据 = init marker +
   内核 `qcow2 "` 开盘点双串。boot job 已接线（e2fsprogs/qemu-utils）。
+
+## 2026-10-18 — console + Xorg fixes from the display bring-up (0069, 0070)
+
+- **0069 (umfb under a platform device):** Xorg's fbdev driver silently
+  refuses framebuffers whose /sys/class/graphics/fbN/device/subsystem is
+  missing or PCI ("only touch non-PCI devices on this path", fbdevhw.c);
+  a parentless virtual fb has no such link, so the probe gave up without
+  a single message and the server died with "No devices detected".
+  Registering umfb under a platform device restores the link.  Verified
+  by strace inside a Debian guest (FBIOGET_FSCREENINFO and friends now
+  reached) and a screenshot rendered out of the sink by umview.
+- **0070 (stdio console vs CONFIG_VT):** with VT enabled, vty_init owns
+  major 4, UML's console tty driver registration fails with -EBUSY and
+  stdio_init() used to return -- which killed every console: no printk
+  console, /dev/console unopenable.  Tolerate the failure and guard the
+  device ops in setup_one_line() for a NULL driver; with VT_CONSOLE off
+  the fd console comes back while Xorg keeps the VT devices it needs.

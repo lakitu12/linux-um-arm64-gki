@@ -1,0 +1,88 @@
+From a34424969c4d0d494e25a4b30b98cd862d4887c6 Mon Sep 17 00:00:00 2001
+From: lakitu12 <1219387824@qq.com>
+Date: Sun, 18 Oct 2026 20:04:02 +0800
+Subject: [PATCH 2/2] um: keep the stdio console when another driver owns the
+ tty space
+
+With CONFIG_VT enabled, vty_init() takes major 4 for the virtual
+terminals (cdev 4:0 plus the 4:1..63 tty driver), so the UML stdio
+console's own tty_register_driver() fails with -EBUSY
+("register_lines : can't register UML console driver").  stdio_init()
+used to return on that failure, which took the whole console with it:
+no printk console, /dev/console unopenable, and every guest message
+silently gone -- boot looked like it hung before the banner.
+
+The channels and the printk console do not need the tty device nodes,
+so tolerate the registration failure (warn, keep going) and guard the
+device operations in setup_one_line() for a NULL driver.  With
+CONFIG_VT (and VT_CONSOLE off) plus this, console=tty0 binds to the
+stdio console again: kernel log over con0=fd:1, Xorg still gets the
+VT devices it wants.  Verified on a VT-enabled x86 UML kernel: full
+boot log, demo markers and guest clients all visible on the host.
+---
+ arch/um/drivers/line.c          | 14 +++++++++++---
+ arch/um/drivers/stdio_console.c |  4 +++-
+ 2 files changed, 14 insertions(+), 4 deletions(-)
+
+diff --git a/arch/um/drivers/line.c b/arch/um/drivers/line.c
+index 43d8959..a0f1a2e 100644
+--- a/arch/um/drivers/line.c
++++ b/arch/um/drivers/line.c
+@@ -370,6 +370,12 @@ int setup_one_line(struct line *lines, int n, char *init,
+ 	struct tty_driver *driver = line->driver->driver;
+ 	int err = -EINVAL;
+ 
++	/*
++	 * driver may be NULL: if another subsystem owns the tty device
++	 * space (CONFIG_VT claims major 4), register_lines() failed and
++	 * these lines have no tty devices -- the channels still work.
++	 */
++
+ 	if (line->port.count) {
+ 		*error_out = "Device is already open";
+ 		goto out;
+@@ -379,7 +385,8 @@ int setup_one_line(struct line *lines, int n, char *init,
+ 		if (line->valid) {
+ 			line->valid = 0;
+ 			kfree(line->init_str);
+-			tty_unregister_device(driver, n);
++			if (driver)
++				tty_unregister_device(driver, n);
+ 			parse_chan_pair(NULL, line, n, opts, error_out);
+ 			err = 0;
+ 		}
+@@ -391,13 +398,14 @@ int setup_one_line(struct line *lines, int n, char *init,
+ 			return -ENOMEM;
+ 		}
+ 		if (line->valid) {
+-			tty_unregister_device(driver, n);
++			if (driver)
++				tty_unregister_device(driver, n);
+ 			kfree(line->init_str);
+ 		}
+ 		line->init_str = new;
+ 		line->valid = 1;
+ 		err = parse_chan_pair(new, line, n, opts, error_out);
+-		if (!err) {
++		if (!err && driver) {
+ 			struct device *d = tty_port_register_device(&line->port,
+ 					driver, n, NULL);
+ 			if (IS_ERR(d)) {
+diff --git a/arch/um/drivers/stdio_console.c b/arch/um/drivers/stdio_console.c
+index 1c23973..e179888 100644
+--- a/arch/um/drivers/stdio_console.c
++++ b/arch/um/drivers/stdio_console.c
+@@ -152,7 +152,9 @@ static int stdio_init(void)
+ 	err = register_lines(&driver, &console_ops, vts,
+ 					ARRAY_SIZE(vts));
+ 	if (err)
+-		return err;
++		printk(KERN_WARNING
++		       "stdio console: no tty devices (%d); using the channels\n",
++		       err);
+ 
+ 	printk(KERN_INFO "Initialized stdio console driver\n");
+ 
+-- 
+2.53.0
+

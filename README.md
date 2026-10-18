@@ -17,18 +17,21 @@ either build and a 16 KB host needs the 16 KB one.  Root disks may be raw
 ext4 or **qcow2** (the stack carries an in-kernel qcow2 engine for the ubd
 backend, `0061–0063`).
 
-The guest's screen can leave the VM as well: **umfb** (`0065–0067`) mirrors
+The guest's screen can leave the VM as well: **umfb** (`0065–0067`, `0069`) mirrors
 `/dev/fb0` into a host file or fd that viewers map — `tools/um-arm64/umview`
 on a Linux desktop (X11 and Wayland sessions alike), the console app's
 display screen on Android.
 
 ## Layout
 
-- `patches/` — the 67-patch stack; `git am` in order onto `android17-6.18`.
+- `patches/` — the 69-patch stack; `git am` in order onto `android17-6.18`.
   49 upstream-port patches (original authors/dates kept), 3 Android guest
   fixes, 8 backports/build fixes, 3 qcow2-engine patches, the loader/multi-
-  session fix (`0064`) and the display set (`0065–0067`, umfb + umview) —
-  the why of each is in `docs/fixlog.md`.
+  session fix (`0064`), the display set (`0065–0067`, umfb + umview —
+  `0069` puts the framebuffer under a platform device so Xorg's fbdev
+  probe accepts it) and the VT coexistence fix (`0070`: keep the stdio
+  console when CONFIG_VT owns the tty device space) — the why of each
+  is in `docs/fixlog.md`.
 - `ci/` — `apply-stack.sh` (stops on conflict, leaves a report),
   `boot-gate.sh` + `init.c` (tiny static initramfs, marker verdict),
   `qcow2-gate.sh` (qcow2 root-disk boot), `umfb-gate.sh` + `umfb-init.c` +
@@ -111,7 +114,7 @@ per-fragment depth, and in-guest verification recipes: `docs/GUEST-FEATURES.md`.
 
 ## Validation status
 
-- Baseline `android17-6.18` @ **6.18.32**; the stack applies 60/60 and the
+- Baseline `android17-6.18` @ **6.18.32**; the stack applies 70/70 and the
   bionic build is green with NDK **r28c** (upstream references r27c; r28c
   turns on extra warning flags, and the stack is fixed up for them).
 - Reference artifacts: `linux-bionic` sha256 `03c3ef3b…a9410c`,
