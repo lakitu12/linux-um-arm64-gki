@@ -30,6 +30,24 @@
 #include <linux/fb.h>
 #include <linux/reboot.h>
 
+#include "gate-out.h"
+
+/* Every printf in this file also reaches /dev/kmsg: with CONFIG_VT the
+ * UML console owns no tty device, /dev/console cannot be opened and fd 1
+ * may not be the log pipe at all (see ci/gate-out.h). */
+static void gate_printf(const char *fmt, ...)
+{
+	char b[512];
+	va_list ap;
+	int n;
+
+	va_start(ap, fmt);
+	n = vsnprintf(b, sizeof(b), fmt, ap);
+	va_end(ap);
+	gate_emit(b, n);
+}
+#define printf gate_printf
+
 /* bytes in memory: R G B A */
 #define C_BASE 0xFF332211u	/* R=11 G=22 B=33 */
 #define C_SQ   0xFFCCBBAAu	/* R=AA G=BB B=CC */
@@ -65,7 +83,7 @@ int main(void)
 	unsigned char *p;
 	int fd;
 
-	setvbuf(stdout, NULL, _IONBF, 0);
+	gate_out_init();
 
 	if (mount_dev())
 		printf("UMFB_GATE_FAIL mount /dev: %s\n", strerror(errno));

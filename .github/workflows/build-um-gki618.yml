@@ -45,6 +45,11 @@ on:
         required: false
         type: boolean
         default: false
+      vt:
+        description: "Build the VT variant a guest needs for a real X server (fragment: ci/vt.config: CONFIG_EXPERT + CONFIG_VT, VT_CONSOLE off); artifacts get a -vt suffix and the UML console loses its tty devices, so gates report through /dev/kmsg."
+        required: false
+        type: boolean
+        default: false
       run_boot:
         description: "Run the arm64 marker boot gate"
         required: false
@@ -62,6 +67,9 @@ env:
   # inputs cannot be tested through the `inputs` context in `if:`; compare the
   # string form instead (same reason the run_boot gate below does).
   PAGE_SUFFIX: "${{ github.event.inputs.pages4k == 'true' && '-4k' || '' }}"
+  # Same for the VT variant: a VT kernel is a separate artifact, never a
+  # replacement for the default one (it has no UML-console tty devices).
+  VT_SUFFIX: "${{ github.event.inputs.vt == 'true' && '-vt' || '' }}"
   KERNEL_DIR: linux
   PATCH_DIR: patches
 
@@ -72,8 +80,10 @@ concurrency:
   # Variant-scoped: the 16 KB and 4 KB artifacts are independent, so only
   # same-variant runs supersede each other (a fresh default run replaces an
   # older default run, including the monthly scheduled one, but never a 4 KB
-  # run — dispatching both back to back is a normal thing to do).
-  group: um-gki618-${{ github.ref }}-${{ github.event.inputs.pages4k == 'true' && '4k' || '16k' }}
+  # run — dispatching both back to back is a normal thing to do).  The VT
+  # variant is part of the key for the same reason: its kernel is not a
+  # replacement for the default one.
+  group: um-gki618-${{ github.ref }}-${{ github.event.inputs.pages4k == 'true' && '4k' || '16k' }}${{ github.event.inputs.vt == 'true' && '-vt' || '' }}
   cancel-in-progress: true
 
 jobs:
@@ -169,6 +179,14 @@ jobs:
             cp "$GITHUB_WORKSPACE/ci/page4k.config" config/page4k.config
             export EXTRA_CONFIG="$EXTRA_CONFIG config/page4k.config"
           fi
+          # VT variant (vt=true): what a guest needs before Xorg will bind
+          # to a virtual terminal.  Kept out of the default set on purpose --
+          # vty_init() takes major 4, so the UML console loses its tty
+          # devices (ci/vt.config has the measured detail).
+          if [ "${{ github.event.inputs.vt }}" = "true" ]; then
+            cp "$GITHUB_WORKSPACE/ci/vt.config" config/vt.config
+            export EXTRA_CONFIG="$EXTRA_CONFIG config/vt.config"
+          fi
           # extra_config appends to the defaults (last fragment wins a clash).
           if [ -n "${{ inputs.extra_config }}" ]; then
             export EXTRA_CONFIG="$EXTRA_CONFIG ${{ inputs.extra_config }}"
@@ -219,12 +237,25 @@ jobs:
           grep -F 'CONFIG_ANDROID_BINDER_DEVICES="binder,hwbinder,vndbinder"' "$CFG" >/dev/null \
             || { echo "missing config: ANDROID_BINDER_DEVICES string"; exit 1; }
           echo "config ok: ANDROID_BINDER_DEVICES"
+          # The VT variant is only useful if VT is really in, DUMMY_CONSOLE
+          # provides the con_driver tty0 needs, and VT_CONSOLE is really out:
+          # VT_CONSOLE routes printk into the VT write path, which has no
+          # backend console in UML and takes the boot log with it.
+          VT_FRAG=""
+          if [ "${{ github.event.inputs.vt }}" = "true" ]; then
+            grep -E "^CONFIG_VT=y$" "$CFG"
+            grep -E "^CONFIG_DUMMY_CONSOLE=y$" "$CFG"
+            grep -E "^# CONFIG_VT_CONSOLE is not set$" "$CFG"
+            echo "config ok: VT variant (VT on, DUMMY_CONSOLE on, VT_CONSOLE off)"
+            VT_FRAG="$KERNEL_DIR/tools/um-arm64/config/vt.config"
+          fi
           python3 "$GITHUB_WORKSPACE/ci/cfg-check.py" "$CFG" \
             "$KERNEL_DIR/tools/um-arm64/config/docker.config" \
             "$KERNEL_DIR/tools/um-arm64/config/docker-completions.config" \
             "$KERNEL_DIR/tools/um-arm64/config/snap-flatpak.config" \
             "$KERNEL_DIR/tools/um-arm64/config/android-guest.config" \
-            "$KERNEL_DIR/tools/um-arm64/config/umfb.config"
+            "$KERNEL_DIR/tools/um-arm64/config/umfb.config" \
+            $VT_FRAG
 
           # Symbols the late fixes/backports brought in must be in the image.
           # Write the nm output to a file first, then grep the file: piping
@@ -259,7 +290,7 @@ jobs:
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: um-gki618${{ env.PAGE_SUFFIX }}-${{ github.run_number }}
+          name: um-gki618${{ env.PAGE_SUFFIX }}${{ env.VT_SUFFIX }}-${{ github.run_number }}
           path: |
             artifacts/linux-bionic
             artifacts/stub_exe_bionic
@@ -276,7 +307,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: um-gki618-failure${{ env.PAGE_SUFFIX }}-${{ github.run_number }}
+          name: um-gki618-failure${{ env.PAGE_SUFFIX }}${{ env.VT_SUFFIX }}-${{ github.run_number }}
           path: |
             apply-report/
             gki-tip.txt
@@ -301,7 +332,7 @@ jobs:
       - name: Download the built kernel
         uses: actions/download-artifact@v4
         with:
-          name: um-gki618${{ env.PAGE_SUFFIX }}-${{ github.run_number }}
+          name: um-gki618${{ env.PAGE_SUFFIX }}${{ env.VT_SUFFIX }}-${{ github.run_number }}
           path: ci-artifacts
 
       - name: Install gate tools
@@ -335,7 +366,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: um-gki618-boot${{ env.PAGE_SUFFIX }}-${{ github.run_number }}
+          name: um-gki618-boot${{ env.PAGE_SUFFIX }}${{ env.VT_SUFFIX }}-${{ github.run_number }}
           path: |
             boot-out/boot.log
             boot-out/summary.txt
@@ -346,7 +377,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: um-gki618-qcow2-boot${{ env.PAGE_SUFFIX }}-${{ github.run_number }}
+          name: um-gki618-qcow2-boot${{ env.PAGE_SUFFIX }}${{ env.VT_SUFFIX }}-${{ github.run_number }}
           path: |
             boot-out-qcow2/boot.log
             boot-out-qcow2/summary.txt
@@ -360,7 +391,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: um-gki618-umfb-boot${{ env.PAGE_SUFFIX }}-${{ github.run_number }}
+          name: um-gki618-umfb-boot${{ env.PAGE_SUFFIX }}${{ env.VT_SUFFIX }}-${{ github.run_number }}
           path: |
             boot-out-umfb/boot.log
             boot-out-umfb/summary.txt
