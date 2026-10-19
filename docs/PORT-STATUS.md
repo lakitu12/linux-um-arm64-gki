@@ -66,3 +66,17 @@ CI 合并 `ci/page4k.config`（16K 关、4K 开），断言改查 `CONFIG_PAGE_S
 - backing / 快照 / 加密 / zstd / 扩展 L2 拒收并给理由；详细口径见 fixlog。
 - 7.2 参考树对应提交与宿主 selftest 位于 `lakitu12/linux-um-arm64`
   的 `tools/um-arm64/qcow2-selftest/`。
+
+## 显示链与 guest X（2026-10-18/19，补丁 0064–0072）
+
+- **umfb（0065）**：fb0 脏 tile 以 15 Hz 差分泵镜像进宿主文件（1024 B 头 + 像素区，含 seq/state），
+  Linux 端 `umview`（0066/0067）与 uml-android app 的显示屏都能看；`video=vfb:` 老路弃用。
+- **0069**：umfb 注册到 platform device —— Xorg 的 fbdev 探针只碰「非 PCI 父设备」的帧缓冲，
+  无父设备时静默放弃（"No devices detected"）。
+- **0070**：CONFIG_VT 与 UML console 抢 major 4 时容忍 console 注册失败（保 channel 版）。
+  最终口径：**VT 不进 guest**（VT 内核下 init 的 fd 1 是 EBADF，见 fixlog 10-19 节）；`-vt` 变体
+  仅作诊断产物保留。
+- **0071**：UML_HOST_TOP 接受 `0x` 前缀（app loader 用 %#x 打印；拒绝前缀=静默回退→bionic_tls 死）。
+- **0072**：stdio console 回答 VT ioctl —— **guest 里跑真 Xorg 的正解**。marble 真机实测：
+  X 起（"(--) using VT number 0"、fbdev 绑 umfb、1024x768），静态画面下 guest fb0 与 sink
+  像素区 md5 逐字节一致，app 显示屏实时呈现（sink seq 递增）。

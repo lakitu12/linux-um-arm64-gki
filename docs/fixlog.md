@@ -95,3 +95,40 @@
   console, /dev/console unopenable.  Tolerate the failure and guard the
   device ops in setup_one_line() for a NULL driver; with VT_CONSOLE off
   the fd console comes back while Xorg keeps the VT devices it needs.
+
+## 2026-10-19 — a guest X server on the console (0071, 0072; CONFIG_VT stays off)
+
+- **0071 (UML_HOST_TOP accepts an 0x prefix):** the app loader prints the
+  value with its %#x-style hex helper (UML_HOST_TOP=0x8000000000);
+  parse_host_top() took bare hex only, so the prefix failed the digit test
+  and the override became a silent no-op — the kernel fell back to the
+  stack-derived heuristic and died in bionic startup ("failed to allocate
+  bionic_tls") before its first print.  Accept the prefix when present;
+  bare hex keeps working.  Measured on marble (4 KB pages, app loader):
+  rejected -> bionic_tls death, parsed -> boots to the guest's init.
+- **0072 (VT ioctls on the stdio console):** Xorg's xfree86 DDX will not
+  reach fb0 without a virtual terminal: parse_vt_settings() VT_OPENQRY's a
+  free one, activates it and waits for it to become active (with -sharevts
+  it asks VT_GETSTATE for the current one instead).  The console has no vt
+  driver behind it and console_ops carried no .ioctl, so every one of those
+  calls was ENOTTY and the server died with "Cannot find a free VT:
+  Inappropriate ioctl for device".  No DDX option avoids it — default,
+  -keeptty, -keeptty -sharevts and -keeptty -novtswitch all die at the same
+  call (xserver 2:21.1.16, fbdev driver already matched and loaded).  The
+  console *is* the guest's one VT (tty0, active, nothing competing), so
+  answer those ioctls: VT_OPENQRY -> 0, VT_GETSTATE -> VT0
+  active+allocated, ACTIVATE/WAITACTIVE on 0, GET/SETMODE, RELDISP,
+  DISALLOCATE, plus the keyboard probes (KD*MODE, KD*LED) as a
+  bare-framebuffer kiosk would; everything else returns -ENOIOCTLCMD.
+- **CONFIG_VT stays out of the guest.**  It takes major 4 away from the
+  console driver, and the VT variant (kept only as a diagnostic artifact)
+  measured the consequence: init's fd 1 comes up closed (EBADF) — run
+  39146286435 — so userland reaches only /dev/kmsg and the app's conN=pts
+  sessions lose their tty devices.  0072 gives X what it needs while the
+  console keeps everything.
+- **Verified end to end (marble, run 39147613026's 4 KB build):** X log
+  shows "(--) using VT number 0", "FBDEV(0): hardware: umfb (video memory:
+  3072kB)", "Virtual size is 1024x768"; with xclock/xlogo drawing, the
+  guest fb0 and the umfb sink's pixel area are md5-identical while the
+  screen is static, and the app's display screen renders the same frames
+  live (sink seq climbing).
