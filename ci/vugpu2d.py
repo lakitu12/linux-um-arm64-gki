@@ -49,8 +49,15 @@ SET_VRING_NUM, SET_VRING_ADDR, SET_VRING_BASE, GET_VRING_BASE = 8, 9, 10, 11
 SET_VRING_KICK, SET_VRING_CALL, SET_VRING_ERR = 12, 13, 14
 GET_PROTOCOL_FEATURES, SET_PROTOCOL_FEATURES = 15, 16
 SET_VRING_ENABLE = 18
+GET_CONFIG, SET_CONFIG = 24, 25
 
 FLAG_REPLY, FLAG_NEED_REPLY = 1 << 2, 1 << 3
+# Protocol features we advertise.  REPLY_ACK is what makes the kernel set
+# NEED_REPLY on its SET requests (and then read a u64 status back); CONFIG is
+# what makes it route config-space reads through VHOST_USER_GET_CONFIG -- the
+# only way virtio-gpu learns num_scanouts (without it the driver reads an
+# uninitialised stack variable and never creates an output, hence no fb0).
+PROTO_F_REPLY_ACK, PROTO_F_CONFIG = 1 << 3, 1 << 9
 # The kernel's own dialect check is
 #     msg->header.flags != (VHOST_USER_FLAG_REPLY | VHOST_USER_VERSION) -> EPROTO
 # so a reply that carries REPLY alone is rejected before any feature exchange
@@ -97,6 +104,34 @@ class Region(object):
 
     def view(self, off, length):
         return self.mv[self.offset + off:self.offset + off + length]
+
+
+class ConfigSpace(object):
+    """The device's virtio config space, as the guest sees it.
+
+    virtio-gpu reads num_scanouts here while probing, and with the UML
+    transport every config access is a VHOST_USER_GET_CONFIG round trip (sent
+    only when the backend advertises VHOST_USER_PROTOCOL_F_CONFIG).  The blob
+    is a real struct virtio_gpu_config:
+
+        u32 events_read, u32 events_clear, u32 num_scanouts, u32 num_capsets
+    """
+
+    SIZE = 16
+
+    def __init__(self):
+        self.buf = bytearray(self.SIZE)
+        struct.pack_into('<III', self.buf, 0, 0, 0, 1)   # num_scanouts = 1
+        self.events = 0
+
+    def read(self, size):
+        """The first `size` bytes of config space, zero-extended."""
+        data = bytes(self.buf[:size])
+        return data + b'\0' * (size - len(data))
+
+    def write(self, offset, data):
+        n = max(0, min(len(data), self.SIZE - offset))
+        self.buf[offset:offset + n] = data[:n]
 
 
 class Vring(object):
@@ -386,6 +421,7 @@ def main():
     a = ap.parse_args()
 
     gpu = GPU(a.width, a.height, a.sink)
+    cfg = ConfigSpace()
     try:
         os.unlink(a.socket)
     except FileNotFoundError:
@@ -428,10 +464,24 @@ def main():
             elif req == SET_FEATURES:
                 gpu.features = struct.unpack('<Q', payload[:8])[0]
             elif req == GET_PROTOCOL_FEATURES:
-                send_msg(conn, req, struct.pack('<Q', 1 << 3), FLAG_REPLY)  # REPLY_ACK
+                feats = PROTO_F_REPLY_ACK | PROTO_F_CONFIG
+                send_msg(conn, req, struct.pack('<Q', feats), FLAG_REPLY)
                 replied = True
             elif req == SET_PROTOCOL_FEATURES:
                 gpu.proto = struct.unpack('<Q', payload[:8])[0]
+            elif req == GET_CONFIG:
+                # struct vhost_user_config { u32 offset; u32 size; u32 flags; u8 payload[]; }
+                # The UML transport always asks from 0 and sets size = the total
+                # length it wants, then insists the reply carry exactly that many
+                # bytes (vhost_user_get_config: header.size == 12 + cfg_size and
+                # config.size == cfg_size, else -EPROTO).
+                _off, cfg_size, _cflags = struct.unpack('<III', payload[:12])
+                data = cfg.read(cfg_size)
+                send_msg(conn, req, struct.pack('<III', 0, len(data), 0) + data)
+                replied = True
+            elif req == SET_CONFIG:
+                _off, ln, _cflags = struct.unpack('<III', payload[:12])
+                cfg.write(_off, payload[12:12 + ln])
             elif req == SET_OWNER:
                 pass
             elif req == SET_MEM_TABLE:
@@ -441,9 +491,14 @@ def main():
                     ga, size, ua, mmo = struct.unpack_from('<QQQQ', payload, off)
                     off += 32
                     fd = fds[k]
-                    mm = mmap.mmap(fd, size, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE,
-                                   offset=mmo & ~0xfff)
                     delta = mmo & 0xfff
+                    # The region starts at `delta` inside the mapped page, so the
+                    # mapping has to cover size + delta or the last page of the
+                    # region falls outside the mmap and every access to it dies
+                    # with IndexError deep inside the ring code.
+                    mm = mmap.mmap(fd, size + delta, mmap.MAP_SHARED,
+                                   mmap.PROT_READ | mmap.PROT_WRITE,
+                                   offset=mmo & ~0xfff)
                     gpu.regions.append(Region(ga, size, mm, delta, fd, mmo))
                     memmaps.append(mm)
                     log('mem region guest=0x%x size=0x%x mmap_off=0x%x' % (ga, size, mmo))
@@ -480,8 +535,14 @@ def main():
             # does not understand left it waiting forever: the guest hit the
             # gate's 300 s timeout (CI run 39207542764, kernel rc=137) right
             # after SET_PROTOCOL_FEATURES.
+            #
+            # The ack payload is a u64 status (0 = success), not an empty
+            # payload: the kernel reads it with vhost_user_recv_u64(), which
+            # returns -EPROTO for any size != 8.  Sending size=0 looked like a
+            # perfectly good "no data" reply and cost CI run 39210613948 --
+            # probe failed with -71 right after SET_PROTOCOL_FEATURES.
             if not replied and (flags & FLAG_NEED_REPLY):
-                send_msg(conn, req, b'')
+                send_msg(conn, req, struct.pack('<Q', 0))
 
             # queues with no kick fd (in-band notifications) are polled here
             for idx, vq in gpu.vrings.items():
