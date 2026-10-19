@@ -448,4 +448,3 @@ jobs:
             boot-out-vgpu/backend.log
             boot-out-vgpu/vg-sink.raw
           if-no-files-found: warn
-          if-no-files-found: warn
