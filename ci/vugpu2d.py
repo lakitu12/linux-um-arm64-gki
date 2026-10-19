@@ -300,6 +300,9 @@ class GPU(object):
             off += 16
         res['backing'] = entries
         log('attach id=%d entries=%d' % (rid, n))
+        log('resource id=%d %dx%d stride=%d backing=%s'
+            % (rid, res['w'], res['h'], res['stride'],
+               [(e[0], e[1]) for e in res['backing']]))
         return ctrl_hdr(RESP_OK_NODATA, 0, fence)
 
     def cmd_transfer(self, cmd, fence):
@@ -307,6 +310,7 @@ class GPU(object):
         offset, = struct.unpack_from('<Q', cmd, CTRL_HDR.size + 16)
         rid, = struct.unpack_from('<I', cmd, CTRL_HDR.size + 24)
         x, y, w, h = struct.unpack_from('<IIII', cmd, CTRL_HDR.size)
+        log('transfer res=%d rect=%dx%d+%d+%d offset=%d' % (rid, w, h, x, y, offset))
         res = self.resources.get(rid)
         if res is None or not res['backing']:
             return ctrl_hdr(RESP_ERR_INVALID_RESOURCE_ID, 0, fence)
@@ -333,7 +337,9 @@ class GPU(object):
 
     def cmd_flush(self, cmd, fence):
         rid, = struct.unpack_from('<I', cmd, CTRL_HDR.size + 16)
+        x, y, w, h = struct.unpack_from('<IIII', cmd, CTRL_HDR.size)
         self.stats['flush'] += 1
+        log('flush res=%d rect=%dx%d+%d+%d' % (rid, w, h, x, y))
         res = self.resources.get(rid)
         if res is not None and self.scanout and self.scanout['res'] == rid:
             sx, sy = self.scanout['x'], self.scanout['y']

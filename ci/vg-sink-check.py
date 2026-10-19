@@ -54,6 +54,33 @@ def main(path):
     ok = got == (0, 0, 0)
     print('  %s untouched (900,700) BGR=%s' % ('ok  ' if ok else 'FAIL', got))
     bad += 0 if ok else 1
+
+    # Where did the red actually land?  The bbox turns a coordinate failure
+    # into a diagnosis: a clipped rect, a dropped row, or nothing at all.
+    minx = miny = 1 << 30
+    maxx = maxy = -1
+    count = 0
+    for y in range(h):
+        row = px[y * stride:(y + 1) * stride]
+        if b'\x00\x00\xff' not in row:      # cheap reject
+            continue
+        for x in range(w):
+            o = x * 4
+            if row[o] == 0 and row[o + 1] == 0 and row[o + 2] == 255:
+                count += 1
+                if x < minx:
+                    minx = x
+                if x > maxx:
+                    maxx = x
+                if y < miny:
+                    miny = y
+                if y > maxy:
+                    maxy = y
+    if count:
+        print('  red bbox: x %d..%d y %d..%d (%d px; probe painted 64x64@0,0 and 40x40@500,300)'
+              % (minx, maxx, miny, maxy, count))
+    else:
+        print('  red bbox: none -- the frame carries no painted pixels')
     return 1 if bad else 0
 
 
