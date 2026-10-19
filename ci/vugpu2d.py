@@ -416,13 +416,16 @@ def main():
                 continue
             req, flags, payload, fds = recv_msg(conn)
             log('req %d size %d fds %d' % (req, len(payload), len(fds)))
+            replied = False
             if req == GET_FEATURES:
                 feats = VIRTIO_F_VERSION_1 | (1 << 30)   # VERSION_1 + PROTOCOL_FEATURES
                 send_msg(conn, req, struct.pack('<Q', feats), FLAG_REPLY)
+                replied = True
             elif req == SET_FEATURES:
                 gpu.features = struct.unpack('<Q', payload[:8])[0]
             elif req == GET_PROTOCOL_FEATURES:
                 send_msg(conn, req, struct.pack('<Q', 1 << 3), FLAG_REPLY)  # REPLY_ACK
+                replied = True
             elif req == SET_PROTOCOL_FEATURES:
                 gpu.proto = struct.unpack('<Q', payload[:8])[0]
             elif req == SET_OWNER:
@@ -462,10 +465,19 @@ def main():
                 idx = struct.unpack('<I', payload[:4])[0] & 0xff
                 send_msg(conn, req, struct.pack('<II', idx, gpu.vrings[idx].last_avail),
                          FLAG_REPLY)
+                replied = True
             else:
-                log('unhandled request %d (size %d)' % (req, len(payload)))
-                if flags & FLAG_NEED_REPLY:
-                    send_msg(conn, req, b'', FLAG_REPLY)
+                log('request %d (size %d, need_reply=%d)'
+                    % (req, len(payload), 1 if flags & FLAG_NEED_REPLY else 0))
+
+            # The kernel sets NEED_REPLY on several SET requests (SET_FEATURES,
+            # SET_PROTOCOL_FEATURES, SET_MEM_TABLE, ...) and blocks in recv
+            # until the ack arrives.  Answering only the requests this backend
+            # does not understand left it waiting forever: the guest hit the
+            # gate's 300 s timeout (CI run 39207542764, kernel rc=137) right
+            # after SET_PROTOCOL_FEATURES.
+            if not replied and (flags & FLAG_NEED_REPLY):
+                send_msg(conn, req, b'')
 
             # queues with no kick fd (in-band notifications) are polled here
             for idx, vq in gpu.vrings.items():
