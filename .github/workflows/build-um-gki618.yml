@@ -50,6 +50,11 @@ on:
         required: false
         type: boolean
         default: false
+      virtiogpu:
+        description: "Add ci/virtio-gpu.config (VIRTIO_UML + UML_PCI_OVER_VIRTIO + DRM + virtio_gpu + fbdev emulation) and run the virtio-gpu gate on the arm64 runner. The kernel then carries DRM/virtio-gpu; the gate boots it against ci/vugpu2d.py, a 2D-only vhost-user-gpu backend."
+        required: false
+        type: boolean
+        default: false
       run_boot:
         description: "Run the arm64 marker boot gate"
         required: false
@@ -187,6 +192,14 @@ jobs:
             cp "$GITHUB_WORKSPACE/ci/vt.config" config/vt.config
             export EXTRA_CONFIG="$EXTRA_CONFIG config/vt.config"
           fi
+          # virtio-gpu rides on the PCI-over-virtio path: DRM only gets
+          # HAS_DMA through UML_DMA_EMULATION, and UML_PCI (selected by
+          # UML_PCI_OVER_VIRTIO) is what selects that.  Asking for CONFIG_DRM
+          # without it silently yields "# CONFIG_DRM is not set".
+          if [ "${{ github.event.inputs.virtiogpu }}" = "true" ]; then
+            cp "$GITHUB_WORKSPACE/ci/virtio-gpu.config" config/virtio-gpu.config
+            export EXTRA_CONFIG="$EXTRA_CONFIG config/virtio-gpu.config"
+          fi
           # extra_config appends to the defaults (last fragment wins a clash).
           if [ -n "${{ inputs.extra_config }}" ]; then
             export EXTRA_CONFIG="$EXTRA_CONFIG ${{ inputs.extra_config }}"
@@ -241,6 +254,16 @@ jobs:
           # provides the con_driver tty0 needs, and VT_CONSOLE is really out:
           # VT_CONSOLE routes printk into the VT write path, which has no
           # backend console in UML and takes the boot log with it.
+          VGPU_FRAG=""
+          if [ "${{ github.event.inputs.virtiogpu }}" = "true" ]; then
+            for k in VIRTIO_UML UML_PCI_OVER_VIRTIO UML_PCI UML_DMA_EMULATION \
+                     HAS_DMA DRM DRM_VIRTIO_GPU DRM_FBDEV_EMULATION VIRTIO_PCI; do
+              grep -E "^CONFIG_${k}=y$" "$CFG" >/dev/null \
+                || { echo "missing config: CONFIG_$k (virtio-gpu variant)"; exit 1; }
+              echo "config ok: $k"
+            done
+            VGPU_FRAG="$KERNEL_DIR/tools/um-arm64/config/virtio-gpu.config"
+          fi
           VT_FRAG=""
           if [ "${{ github.event.inputs.vt }}" = "true" ]; then
             grep -E "^CONFIG_VT=y$" "$CFG"
@@ -255,7 +278,7 @@ jobs:
             "$KERNEL_DIR/tools/um-arm64/config/snap-flatpak.config" \
             "$KERNEL_DIR/tools/um-arm64/config/android-guest.config" \
             "$KERNEL_DIR/tools/um-arm64/config/umfb.config" \
-            $VT_FRAG
+            $VT_FRAG $VGPU_FRAG
 
           # Symbols the late fixes/backports brought in must be in the image.
           # Write the nm output to a file first, then grep the file: piping
@@ -398,4 +421,31 @@ jobs:
             boot-out-umfb/verdict.txt
             boot-out-umfb/check.txt
             boot-out-umfb/fb.raw
+
+      - name: Virtio GPU gate
+        # Boots the same artifact against ci/vugpu2d.py (a 2D-only
+        # vhost-user-gpu backend) over virtio_uml's socket.  Evidence, not an
+        # exit status: driver bind line + probe markers in boot.log, a
+        # create/transfer/flush cycle in backend.log, and the painted pixels
+        # in the sink (ci/vg-sink-check.py).
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.virtiogpu == 'true' }}
+        run: |
+          mkdir -p boot-out-vgpu
+          bash ci/virtio-gpu-gate.sh ci-artifacts/artifacts/linux-bionic boot-out-vgpu | tee boot-out-vgpu/summary.txt
+        shell: bash
+
+      - name: Upload virtio-gpu gate evidence
+        # vg-sink.raw is the frame the backend published (~3 MB); backend.log
+        # is the other half of the verdict.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: um-gki618-vgpu-boot${{ env.PAGE_SUFFIX }}${{ env.VT_SUFFIX }}-${{ github.run_number }}
+          path: |
+            boot-out-vgpu/boot.log
+            boot-out-vgpu/summary.txt
+            boot-out-vgpu/verdict.txt
+            boot-out-vgpu/backend.log
+            boot-out-vgpu/vg-sink.raw
+          if-no-files-found: warn
           if-no-files-found: warn
