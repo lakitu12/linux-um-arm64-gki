@@ -91,6 +91,26 @@ def ctrl_hdr(type_, flags=0, fence=0):
     return CTRL_HDR.pack(type_, flags, fence, 0, 0)
 
 
+
+def seg_addr(segments, off):
+    """Guest address of resource offset `off`, walking the backing segments.
+
+    A resource's backing is a list of (guest_addr, length) pieces, and the
+    pieces are NOT adjacent in the guest's address space: the UML transport
+    hands out the physmem range in separate mmaps with the guest's reserved
+    area between them (run 39242258368: 0xc10000+1327104 and
+    0x1980000+1818624, a 12 MB hole in between).  Reading `base + off`
+    linearly past the first piece therefore reads somebody else's memory --
+    that is exactly how the probe's second block landed at the wrong rows
+    with its last pixel missing.  Walk the pieces instead.
+    """
+    for ga, ln in segments:
+        if off < ln:
+            return ga + off
+        off -= ln
+    return None
+
+
 class Region(object):
     def __init__(self, guest_addr, size, mm, offset, fd, mmap_offset):
         self.guest_addr = guest_addr
@@ -316,11 +336,15 @@ class GPU(object):
             return ctrl_hdr(RESP_ERR_INVALID_RESOURCE_ID, 0, fence)
         # virtio-gpu semantics: the rectangle is copied from the guest's backing
         # memory, starting at `offset`, row by row, into the host resource.
+        # Rows advance by the resource's stride and each row's guest address is
+        # resolved through the backing pieces (see seg_addr).
         stride = res['stride']
-        src_base = res['backing'][0][0] + offset
         row_bytes = w * 4
         for row in range(h):
-            p = self.ptr(src_base + row * row_bytes, row_bytes)
+            src = seg_addr(res['backing'], offset + row * stride)
+            if src is None:
+                return ctrl_hdr(RESP_ERR_UNSPEC, 0, fence)
+            p = self.ptr(src, row_bytes)
             if p is None:
                 return ctrl_hdr(RESP_ERR_UNSPEC, 0, fence)
             dst = (y + row) * stride + x * 4
