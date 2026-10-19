@@ -3,15 +3,21 @@
  * vgprobe-init.c -- the init of the virtio-gpu gate (ci/virtio-gpu-gate.sh).
  *
  * Boots inside a bare initramfs, reports what the guest's display stack became
- * (proc/fb, the fb0 geometry), POKES it with pwrite, and powers off.  The
- * verdict is decided outside (the sink the vhost-user backend writes + the
- * backend's own log), never by a status code from here.
+ * (proc/fb, the fb0 geometry), PAINTS the framebuffer, forces one modeset and
+ * powers off.  The verdict is decided outside (the sink the vhost-user backend
+ * writes + the backend's own log), never by a status code from here.
  *
- * pwrite, not mmap: a store through an fb mapping is invisible to DRM's fbdev
- * emulation -- damage is only noted in the fb write path, so an mmap write
- * would leave the backend with nothing to transfer and the gate would fail for
- * a reason that has nothing to do with virtio-gpu.  (umfb-init.c discovered the
- * same thing and probes both routes; here only the write path matters.)
+ * Painting goes through mmap: a store to a MISSING pte calls into
+ * fb_deferred_io's page_mkwrite, which is what queues the deferred work whose
+ * dirty callback becomes RESOURCE_TRANSFER_TO_HOST_2D + RESOURCE_FLUSH.  The
+ * pwrite path only updates the shadow buffer (fb_sys_write; no pageref, so no
+ * work is ever queued) -- run 39238602845 proved it: fb0 was up, the probe
+ * passed, and the backend still recorded flush=0.
+ *
+ * The forced FBIOPUT_VSCREENINFO is the other half: fb_set_var() bails out
+ * unless the var differs or FB_ACTIVATE_FORCE is set, and a plane that never
+ * got a set_par() commit holds no fb, so a damage-only commit has no plane
+ * state to update and nothing reaches the wire.
  */
 #include "gate-out.h"
 
@@ -21,6 +27,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/reboot.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -53,6 +60,8 @@ int main(void)
 	int fd, n, f;
 	char b[512];
 	uint32_t red = 0x00ff0000;          /* XRGB8888: red */
+	uint32_t *pix;
+	size_t stride;
 	int x, y;
 
 	gate_out_init();
@@ -97,23 +106,33 @@ int main(void)
 	     var.xres, var.yres, var.bits_per_pixel, fix.line_length,
 	     fix.smem_len, fix.id);
 
-	/* Paint a 64x64 red block at the origin through the write path. */
+	pix = mmap(NULL, fix.smem_len, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	if (pix == MAP_FAILED) {
+		emit("VG_GATE_FAIL mmap fb0: %s\n", strerror(errno));
+		poweroff_now();
+	}
+	stride = fix.line_length / 4;
+
+	/* Paint a 64x64 red block at the origin, and one far from it: a backend
+	 * that only handles the first tile of a resource would still pass a
+	 * single-block test. */
 	for (y = 0; y < 64; y++)
 		for (x = 0; x < 64; x++)
-			if (pwrite(fd, &red, 4,
-				   (off_t)y * fix.line_length + (off_t)x * 4) != 4) {
-				emit("VG_GATE_FAIL pwrite y=%d x=%d: %s\n",
-				     y, x, strerror(errno));
-				poweroff_now();
-			}
-	/* A block far from the origin too: a backend that only handles the first
-	 * tile of a resource would still pass a single-block test. */
+			pix[y * stride + x] = red;
 	for (y = 300; y < 340; y++)
 		for (x = 500; x < 540; x++)
-			(void)!pwrite(fd, &red, 4,
-				      (off_t)y * fix.line_length + (off_t)x * 4);
+			pix[y * stride + x] = red;
 
 	emit("VG_GATE_PAINTED 64x64@0,0 and 40x40@500,300\n");
+
+	/* The mode did not change, so ask for the commit explicitly. */
+	var.activate = FB_ACTIVATE_FORCE;
+	if (ioctl(fd, FBIOPUT_VSCREENINFO, &var)) {
+		emit("VG_GATE_WARN FBIOGET_VSCREENINFO force: %s\n", strerror(errno));
+	}
+	/* msync/fsync run the deferred-IO work now instead of 50 ms from now:
+	 * fb_deferred_io_fsync() is flush_delayed_work() on the damage work. */
+	msync(pix, fix.smem_len, MS_SYNC);
 	fsync(fd);
 	emit("VG_GATE_PASS\n");
 	close(fd);

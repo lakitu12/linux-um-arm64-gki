@@ -103,7 +103,7 @@ grep -q "VG_GATE_INFO" "$OUT/boot.log" || { echo "  FAIL probe never saw /dev/fb
 grep -q "VG_GATE_PASS" "$OUT/boot.log" || { echo "  FAIL probe did not finish"; fail=1; }
 grep -qi "virtio_gpu" "$OUT/boot.log" || { echo "  FAIL no virtio_gpu in the kernel log"; fail=1; }
 grep -q "create_2d" "$OUT/backend.log" || { echo "  FAIL backend saw no RESOURCE_CREATE_2D"; fail=1; }
-grep -q "flush" "$OUT/backend.log" || { echo "  FAIL backend saw no RESOURCE_FLUSH"; fail=1; }
+grep -q "^\[vugpu\] flush " "$OUT/backend.log" || { echo "  FAIL backend saw no RESOURCE_FLUSH"; fail=1; }
 python3 "$HERE/vg-sink-check.py" "$OUT/vg-sink.raw" || fail=1
 
 if [ $fail = 0 ]; then
