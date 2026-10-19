@@ -51,6 +51,12 @@ GET_PROTOCOL_FEATURES, SET_PROTOCOL_FEATURES = 15, 16
 SET_VRING_ENABLE = 18
 
 FLAG_REPLY, FLAG_NEED_REPLY = 1 << 2, 1 << 3
+# The kernel's own dialect check is
+#     msg->header.flags != (VHOST_USER_FLAG_REPLY | VHOST_USER_VERSION) -> EPROTO
+# so a reply that carries REPLY alone is rejected before any feature exchange
+# (measured in CI run 39205883897: probe failed with error -71, backend saw
+# SET_OWNER and GET_FEATURES and nothing else).
+VHOST_USER_VERSION = 1
 VHOST_USER_F_PROTOCOL_FEATURES = 1 << 30
 
 # virtio feature bits we accept: VERSION_1 only (plus the transport's own).
@@ -353,7 +359,7 @@ def recv_msg(s):
     return req, flags, payload, fds
 
 
-def send_msg(s, req, payload=b'', flags=FLAG_REPLY, fds=()):
+def send_msg(s, req, payload=b'', flags=FLAG_REPLY | VHOST_USER_VERSION, fds=()):
     hdr = struct.pack('<III', req, flags, len(payload))
     if fds:
         s.sendmsg([hdr + payload], [(socket.SOL_SOCKET, socket.SCM_RIGHTS,

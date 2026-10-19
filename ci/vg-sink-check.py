@@ -15,8 +15,12 @@ MAGIC = 0x4D46554D
 
 
 def main(path):
-    with open(path, 'rb') as f:
-        raw = f.read()
+    try:
+        with open(path, 'rb') as f:
+            raw = f.read()
+    except OSError as e:
+        print('  FAIL no sink (%s) -- the backend never published a frame' % e)
+        return 1
     if len(raw) < 1024:
         print('  FAIL sink shorter than its header (%d bytes)' % len(raw))
         return 1
