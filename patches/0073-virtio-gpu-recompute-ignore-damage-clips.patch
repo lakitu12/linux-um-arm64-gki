@@ -1,0 +1,38 @@
+From 72639780dfb56f0b953b3fe9c7933f60ca0cd982 Mon Sep 17 00:00:00 2001
+From: lakitu12 <41334611+lakitu12@users.noreply.github.com>
+Date: Tue, 20 Oct 2026 00:38:31 +0800
+Subject: [PATCH] drm/virtio: recompute ignore_damage_clips instead of setting
+ it once
+
+---
+ drivers/gpu/drm/virtio/virtgpu_plane.c | 13 +++++++++++--
+ 1 file changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/virtio/virtgpu_plane.c b/drivers/gpu/drm/virtio/virtgpu_plane.c
+index b61c869..4b411ab 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_plane.c
++++ b/drivers/gpu/drm/virtio/virtgpu_plane.c
+@@ -159,9 +159,18 @@ static int virtio_gpu_plane_atomic_check(struct drm_plane *plane,
+ 	 * Ignore damage clips if the framebuffer attached to the plane's state
+ 	 * has changed since the last plane update (page-flip). In this case, a
+ 	 * full plane update should happen because uploads are done per-buffer.
++	 *
++	 * The flag is carried over by state duplication (the whole
++	 * drm_plane_state is memcpy'd in
++	 * __drm_atomic_helper_plane_duplicate_state(), and only
++	 * fb_damage_clips is reset there), so it must be *recomputed* on every
++	 * commit. Setting it once -- at the first commit that attaches a
++	 * framebuffer -- used to be permanent: from then on every commit
++	 * ignored the damage clips and transferred the whole plane, which on a
++	 * 1024x768 scanout is 3 MB per frame instead of the damaged rows.
+ 	 */
+-	if (old_plane_state->fb != new_plane_state->fb)
+-		new_plane_state->ignore_damage_clips = true;
++	new_plane_state->ignore_damage_clips =
++		old_plane_state->fb != new_plane_state->fb;
+ 
+ 	crtc_state = drm_atomic_get_crtc_state(state,
+ 					       new_plane_state->crtc);
+-- 
+2.53.0
+
