@@ -365,6 +365,9 @@ def send_msg(s, req, payload=b'', flags=FLAG_REPLY, fds=()):
     # exactly how the first CI attempt still failed after the default was
     # fixed: the GET_FEATURES call passed FLAG_REPLY by hand).
     flags |= VHOST_USER_VERSION
+    # The kernel's checks are exact (flags == REPLY|VERSION, and for the u64
+    # getters payload size == 8), so log what actually goes on the wire.
+    log('reply req=%d flags=0x%x size=%d' % (req, flags, len(payload)))
     hdr = struct.pack('<III', req, flags, len(payload))
     if fds:
         s.sendmsg([hdr + payload], [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
@@ -415,7 +418,8 @@ def main():
             if conn not in ready:
                 continue
             req, flags, payload, fds = recv_msg(conn)
-            log('req %d size %d fds %d' % (req, len(payload), len(fds)))
+            log('req %d flags=0x%x size %d fds %d'
+                % (req, flags, len(payload), len(fds)))
             replied = False
             if req == GET_FEATURES:
                 feats = VIRTIO_F_VERSION_1 | (1 << 30)   # VERSION_1 + PROTOCOL_FEATURES
