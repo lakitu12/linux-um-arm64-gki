@@ -132,3 +132,43 @@
   guest fb0 and the umfb sink's pixel area are md5-identical while the
   screen is static, and the app's display screen renders the same frames
   live (sink seq climbing).
+
+- **0073 (`ignore_damage_clips` was sticky — the whole plane was uploaded every frame):**
+  guest X (xserver 21.1.16, modesetting) hands the kernel a correct damage clip on
+  every frame, yet virtio-gpu transferred and flushed the full 1024x768 plane: 3 MB
+  per frame where 43 KB was damaged, which is what kept the host-side 2D backend at
+  ~55% of a core at 45 fps.
+
+  Measured on dash (6.18.32, this stack plus one printk per decision point):
+
+  | probe | output |
+  |---|---|
+  | `drm_mode_dirtyfb_ioctl()` | `n=1 clip0=300,300-420,390` — 197 of 199 calls; X is fine |
+  | `drm_atomic_helper_dirtyfb()` | `blob=1 clipn=1` — the clip does reach the plane state |
+  | `drm_atomic_helper_damage_iter_init()` | `clips=1 n=1 ign=1 srceq=1` — only `ignore_damage_clips` is true |
+  | `virtio_gpu_primary_plane_update()` | `ign=1 blob=1 fbchg=0 merged=0,0-1024,768` |
+
+  `virtio_gpu_plane_atomic_check()` only ever *set* the flag:
+
+  ```c
+  if (old_plane_state->fb != new_plane_state->fb)
+          new_plane_state->ignore_damage_clips = true;
+  ```
+
+  and `__drm_atomic_helper_plane_duplicate_state()` memcpy's the whole
+  `drm_plane_state` while resetting only `fb_damage_clips`.  So the `true` written by
+  the first commit that attached a framebuffer (the probe line with `fbchg=1`) was
+  inherited by every later commit: `fbchg=0` on all following frames is the proof that
+  the flag was history, not the current buffer pair.  Damage clips were ignored for the
+  lifetime of the plane.
+
+  Fix: recompute per commit
+  (`new_plane_state->ignore_damage_clips = old_plane_state->fb != new_plane_state->fb;`).
+  A full upload still happens exactly when the plane's buffer changes, which is the case
+  the flag exists for.
+
+  Verified after the fix (same probe kernel, same 120x90 toggle): `76/76` iterator
+  decisions are `partial n=1`, the plane update reports `merged=300,300-420,390`, the
+  host backend logs `transfer/flush rect=120x90+300+300` on 1104/1104 commands (was
+  620/620 `1024x768+0+0`), and the backend process drops from ~55% to **2.1% of one
+  core** while the guest draws at the same rate.
