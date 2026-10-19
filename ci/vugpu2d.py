@@ -359,7 +359,12 @@ def recv_msg(s):
     return req, flags, payload, fds
 
 
-def send_msg(s, req, payload=b'', flags=FLAG_REPLY | VHOST_USER_VERSION, fds=()):
+def send_msg(s, req, payload=b'', flags=FLAG_REPLY, fds=()):
+    # Every reply must carry the version, and call sites pass FLAG_REPLY
+    # explicitly, so OR it in here instead of trusting the default (that is
+    # exactly how the first CI attempt still failed after the default was
+    # fixed: the GET_FEATURES call passed FLAG_REPLY by hand).
+    flags |= VHOST_USER_VERSION
     hdr = struct.pack('<III', req, flags, len(payload))
     if fds:
         s.sendmsg([hdr + payload], [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
