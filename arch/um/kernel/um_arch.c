@@ -431,7 +431,18 @@ int __init linux_main(int argc, char **argv, char **envp)
 
 	host_task_size = get_top_address(envp);
 	/* reserve a few pages for the stubs */
+	/*
+	 * arm64 builds the slot geometry on this being STUB_SLOT_SIZE-aligned:
+	 * the stub's SIGSYS handler derives its slot from its own SP, which is
+	 * only possible if aligning the SP down lands on a slot base
+	 * (docs §12.35).  Rounding the whole stub region down is the cheapest
+	 * way to get that without moving STUB_CODE.
+	 */
+#if defined(__aarch64__)
+	stub_start = (host_task_size - STUB_SIZE) & ~(STUB_SLOT_SIZE - 1);
+#else
 	stub_start = host_task_size - STUB_SIZE;
+#endif
 	host_task_size = stub_start;
 
 	/* Limit TASK_SIZE to what is addressable by the page table */

@@ -28,7 +28,7 @@
 #include <time.h>
 #include <unistd.h>
 
-static unsigned long iters = 20000000UL;
+static unsigned long iters = 200000000UL;
 static volatile int go;
 
 struct worker {
@@ -36,7 +36,7 @@ struct worker {
 	long index;
 	uint64_t t_start;
 	uint64_t t_end;
-	uint64_t cpu_ns;	/* CLOCK_THREAD_CPUTIME_ID around the work */
+	uint64_t cpu_ns;	/* CLOCK_THREAD_CPUTIME_ID -- see the note below */
 	long host_tid;
 };
 
@@ -150,12 +150,16 @@ static uint64_t run(unsigned long nthreads, int verbose)
 		       "cpu_sum_us=%lld\n",
 		       (long long)((tmax - tmin) / 1000), (long long)((t1 - t0) / 1000),
 		       (long long)(cpu_sum / 1000));
-		/* Thread CPU time over wall time: ~1 means the threads took
-		 * turns on one CPU, ~nthreads means one CPU each.  This does
-		 * not care when a thread started, only how much CPU time it
-		 * actually burned. */
-		printf("THREADSCALE:   parallelism=%.2f\n",
-		       (t1 - t0) ? (double)cpu_sum / (double)(t1 - t0) : 0.0);
+		/*
+		 * cpu_sum is printed for completeness, NOT as a metric: under
+		 * UML a guest CLOCK_THREAD_CPUTIME_ID measures the same thing
+		 * as the thread's wall clock (measured: cpu_ns == t_end -
+		 * t_start for every thread), so it cannot be used to tell
+		 * "one CPU each" from "took turns".  The wall-clock speedup is
+		 * the honest number here; it is only stable because the work
+		 * per thread (200M iterations, ~83ms) dwarfs the ~30ms it can
+		 * take a freshly created thread to start.
+		 */
 	}
 
 	free(w);

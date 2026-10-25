@@ -19,7 +19,7 @@ noinline static void real_init(void)
 		int    ss_flags;
 		size_t ss_size;
 	} stack = {
-		.ss_size = STUB_DATA_PAGES * UM_KERN_PAGE_SIZE,
+		.ss_size = STUB_SLOT_SIZE,
 	};
 	struct {
 		void *sa_handler_;
@@ -67,11 +67,11 @@ noinline static void real_init(void)
 		stub_syscall1(__NR_exit, 11);
 
 	res = stub_syscall6(STUB_MMAP_NR,
-			    init_data.stub_start + UM_KERN_PAGE_SIZE,
+			    init_data.stub_start + STUB_DATA_OFFSET,
 			    STUB_DATA_TOTAL_PAGES * UM_KERN_PAGE_SIZE,
 			    PROT_READ | PROT_WRITE, MAP_FIXED | MAP_SHARED,
 			    init_data.stub_data_fd, init_data.stub_data_offset);
-	if (res != init_data.stub_start + UM_KERN_PAGE_SIZE)
+	if (res != init_data.stub_start + STUB_DATA_OFFSET)
 		stub_syscall1(__NR_exit, 12);
 
 	/* In SECCOMP mode, we only need the signalling FD from now on */
@@ -81,8 +81,8 @@ noinline static void real_init(void)
 			stub_syscall1(__NR_exit, 13);
 	}
 
-	/* setup signal stack inside stub data */
-	stack.ss_sp = (void *)init_data.stub_start + UM_KERN_PAGE_SIZE;
+	/* setup signal stack inside slot 0 of the stub data */
+	stack.ss_sp = (void *)init_data.stub_start + STUB_DATA_OFFSET;
 	stub_syscall2(__NR_sigaltstack, (unsigned long)&stack, 0);
 
 	/* register signal handlers */

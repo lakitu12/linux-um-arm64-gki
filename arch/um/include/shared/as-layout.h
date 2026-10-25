@@ -22,7 +22,7 @@
  */
 #define STUB_START stub_start
 #define STUB_CODE STUB_START
-#define STUB_DATA (STUB_CODE + UM_KERN_PAGE_SIZE)
+/* STUB_DATA is defined below, after the slot geometry it depends on. */
 /*
  * One page of bookkeeping plus a signal stack. In SECCOMP mode the host kernel
  * writes a complete signal frame onto that stack when it delivers SIGSYS to the
@@ -67,8 +67,31 @@
 #define STUB_MAX_SLOTS 8
 #define STUB_SLOT_SIZE (STUB_DATA_PAGES * UM_KERN_PAGE_SIZE)
 #define STUB_DATA_TOTAL_PAGES (STUB_DATA_PAGES * STUB_MAX_SLOTS)
+
+/*
+ * Where the slot region starts.
+ *
+ * arm64 puts it a whole slot after the code page and aligns stub_start to a
+ * slot, so that every slot base is STUB_SLOT_SIZE-aligned.  That alignment is
+ * what lets the stub work out which slot it owns from its own stack pointer --
+ * the only per-thread handle a process-wide SIGSYS disposition leaves it, since
+ * the handler runs on the thread's own sigaltstack, which lives inside its
+ * slot (docs §12.35).
+ *
+ * x86 keeps the historical "data immediately follows the code page" layout:
+ * the slot work is arm64-only for now, and moving x86's data page would change
+ * the ADR/LEA-based get_stub_data() it still uses.
+ */
+#if defined(__aarch64__)
+#define STUB_DATA (STUB_CODE + STUB_SLOT_SIZE)
+#define STUB_SIZE (STUB_SLOT_SIZE + STUB_DATA_TOTAL_PAGES * UM_KERN_PAGE_SIZE)
+#else
+#define STUB_DATA (STUB_CODE + UM_KERN_PAGE_SIZE)
 #define STUB_SIZE ((1 + STUB_DATA_TOTAL_PAGES) * UM_KERN_PAGE_SIZE)
+#endif
 #define STUB_END (STUB_START + STUB_SIZE)
+/* Offset of the slot region from STUB_START (what the stub mmaps). */
+#define STUB_DATA_OFFSET (STUB_DATA - STUB_CODE)
 
 #ifndef __ASSEMBLER__
 

@@ -246,27 +246,30 @@ static __always_inline unsigned long stub_cycles_per_us(void)
 }
 
 /*
- * The stub's data page immediately follows its code page. "adr" gives a
- * PC-relative address in a single instruction, so this is one instruction
- * cheaper than x86's "lea 0(%rip)".
+ * The stub's own slot, derived from the stack pointer (docs §12.35).
  *
- * The masks are register operands, not immediates: UM_KERN_PAGE_SIZE is not a
- * compile-time constant this code may assume, and a 16K or 64K page host must
- * produce different masks without any source change.
+ * This used to be "the page after my own code page" -- one ADR, correct while
+ * an mm had exactly one stub_data.  With per-task slots the code page is shared
+ * by every thread of the mm and only the data differs, so the address has to
+ * come from something per-thread.  What is left is the sigaltstack: signal
+ * dispositions are process-wide, but each thread's altstack is its own, the
+ * handler runs with SA_ONSTACK, and the sigstack lives inside the thread's
+ * slot.  As-layout.h therefore places the slot region a whole slot after the
+ * code page and aligns stub_start to a slot, so masking the SP down lands on
+ * the slot base.
+ *
+ * STUB_SLOT_SIZE is a power of two by construction (STUB_DATA_PAGES is), which
+ * is what makes the mask a mask.  Register operands, not immediates: page size
+ * is a runtime property of the host (4K and 16K builds ship), so the mask has
+ * to be computed, not assembled.
  */
 static __always_inline void *get_stub_data(void)
 {
-	unsigned long ret;
+	unsigned long sp;
 
-	__asm__ volatile (
-		"adr %0, .\n"
-		"and %0, %0, %1\n"
-		"add %0, %0, %2\n"
-		: "=&r" (ret)
-		: "r" (~(unsigned long)(UM_KERN_PAGE_SIZE - 1)),
-		  "r" ((unsigned long)UM_KERN_PAGE_SIZE));
+	__asm__ volatile ("mov %0, sp" : "=r" (sp));
 
-	return (void *)ret;
+	return (void *)(sp & ~(unsigned long)(STUB_SLOT_SIZE - 1));
 }
 
 /*
