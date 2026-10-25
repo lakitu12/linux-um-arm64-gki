@@ -175,4 +175,13 @@ struct stub_data {
 		__aligned(UM_KERN_PAGE_SIZE);
 };
 
+/*
+ * Slot @slot of mm @id: the slot region starts at STUB_DATA (the code page's
+ * neighbour) and slots are STUB_SLOT_SIZE apart.  mm_id->stack is the kernel's
+ * mapping of that region, so this is also the pointer the stub process sees.
+ */
+#define STUB_DATA_SLOT(id, slot) \
+	((struct stub_data *)((id)->stack + \
+			      (unsigned long)(slot) * STUB_SLOT_SIZE))
+
 #endif

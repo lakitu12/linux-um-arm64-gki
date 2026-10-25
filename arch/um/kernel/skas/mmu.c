@@ -18,7 +18,8 @@
 #include <stub-data.h>
 
 /* Ensure the stub_data struct covers the allocated area */
-static_assert(sizeof(struct stub_data) == STUB_DATA_PAGES * UM_KERN_PAGE_SIZE);
+/* Ensure one slot of the allocated region covers a whole struct stub_data */
+static_assert(sizeof(struct stub_data) == STUB_SLOT_SIZE);
 
 static spinlock_t mm_list_lock;
 static struct list_head mm_list;
@@ -53,10 +54,11 @@ int init_new_context(struct task_struct *task, struct mm_struct *mm)
 	mm->context.prefault_next = 0;
 	mm->context.prefault_level = 0;
 
-	stack = __get_free_pages(GFP_KERNEL | __GFP_ZERO, ilog2(STUB_DATA_PAGES));
+	stack = __get_free_pages(GFP_KERNEL | __GFP_ZERO,
+				 ilog2(STUB_DATA_TOTAL_PAGES));
 	if (stack == 0) {
 		printk(KERN_ERR "%s: failed to allocate %d stub data pages\n",
-		       __func__, STUB_DATA_PAGES);
+		       __func__, STUB_DATA_TOTAL_PAGES);
 		goto out;
 	}
 
@@ -82,7 +84,7 @@ int init_new_context(struct task_struct *task, struct mm_struct *mm)
 	return 0;
 
  out_free:
-	free_pages(new_id->stack, ilog2(STUB_DATA_PAGES));
+	free_pages(new_id->stack, ilog2(STUB_DATA_TOTAL_PAGES));
  out:
 	return ret;
 }
@@ -113,7 +115,7 @@ static void reap_dying_stub(pid_t pid)
 		list_del(&d->list);
 		if (d->sock)
 			os_close_file(d->sock);
-		free_pages(d->stack, ilog2(STUB_DATA_PAGES));
+		free_pages(d->stack, ilog2(STUB_DATA_TOTAL_PAGES));
 		kfree(d);
 		return;
 	}
@@ -184,7 +186,7 @@ void destroy_context(struct mm_struct *mm)
 	if (using_seccomp && mmu->id.sock)
 		os_close_file(mmu->id.sock);
 
-	free_pages(mmu->id.stack, ilog2(STUB_DATA_PAGES));
+	free_pages(mmu->id.stack, ilog2(STUB_DATA_TOTAL_PAGES));
 }
 
 static irqreturn_t mm_sigchld_irq(int irq, void* dev)

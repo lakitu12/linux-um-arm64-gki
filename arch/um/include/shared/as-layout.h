@@ -53,7 +53,21 @@
 #else
 #define STUB_DATA_PAGES 2
 #endif
-#define STUB_SIZE ((1 + STUB_DATA_PAGES) * UM_KERN_PAGE_SIZE)
+/*
+ * Per-task stub data slots (docs §12.35).  One mm has STUB_MAX_SLOTS copies of
+ * struct stub_data, laid out back to back after the one shared code page, so a
+ * guest thread can be handed its own register handoff / futex / pending
+ * syscall queue / signal stack.  B0 keeps only slot 0 in use; the point of
+ * this stage is the layout and the accessors, not concurrency.
+ *
+ * 8 because the ceiling is nearly free (it is only address space and a
+ * per-mm allocation) and a thread that has to be refused a slot is a failure
+ * mode nobody wants to debug.
+ */
+#define STUB_MAX_SLOTS 8
+#define STUB_SLOT_SIZE (STUB_DATA_PAGES * UM_KERN_PAGE_SIZE)
+#define STUB_DATA_TOTAL_PAGES (STUB_DATA_PAGES * STUB_MAX_SLOTS)
+#define STUB_SIZE ((1 + STUB_DATA_TOTAL_PAGES) * UM_KERN_PAGE_SIZE)
 #define STUB_END (STUB_START + STUB_SIZE)
 
 #ifndef __ASSEMBLER__

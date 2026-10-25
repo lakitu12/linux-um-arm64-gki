@@ -159,7 +159,7 @@ __uml_setup("seccomp_spin=", uml_seccomp_spin_setup,
 
 void wait_stub_done_seccomp(struct mm_id *mm_idp, int running, int wait_sigsys)
 {
-	struct stub_data *data = (void *)mm_idp->stack;
+	struct stub_data *data = STUB_DATA_SLOT(mm_idp, 0);
 	unsigned long budget;
 	unsigned int futex_val;
 	int ret;
@@ -590,7 +590,7 @@ int have_stub_cycles;
  */
 int start_userspace(struct mm_id *mm_id)
 {
-	struct stub_data *proc_data = (void *)mm_id->stack;
+	struct stub_data *proc_data = STUB_DATA_SLOT(mm_id, 0);
 	struct tramp_data tramp_data = {
 		.stub_data = proc_data,
 	};
@@ -797,7 +797,7 @@ void userspace(struct uml_pt_regs *regs)
 		current_mm_sync();
 
 		if (using_seccomp) {
-			struct stub_data *proc_data = (void *) mm_id->stack;
+			struct stub_data *proc_data = STUB_DATA_SLOT(mm_id, 0);
 
 			err = set_stub_state(regs, proc_data, singlestepping());
 			if (err) {

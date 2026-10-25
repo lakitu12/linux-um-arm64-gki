@@ -36,6 +36,7 @@ struct worker {
 	long index;
 	uint64_t t_start;
 	uint64_t t_end;
+	uint64_t cpu_ns;	/* CLOCK_THREAD_CPUTIME_ID around the work */
 	long host_tid;
 };
 
@@ -48,18 +49,25 @@ static void *spin(void *arg)
 		__asm__ volatile("" ::: "memory");
 
 	w->host_tid = (long)syscall(SYS_gettid);
-	w->t_start = 0;
 	{
 		struct timespec ts;
 
 		clock_gettime(CLOCK_MONOTONIC, &ts);
 		w->t_start = (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
 	}
+	{
+		struct timespec ts;
+
+		clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+		w->cpu_ns = (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+	}
 	for (i = 0; i < iters; i++)
 		__asm__ volatile("" : "+r"(acc) :: "memory");
 	{
 		struct timespec ts;
 
+		clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+		w->cpu_ns = ((uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec) - w->cpu_ns;
 		clock_gettime(CLOCK_MONOTONIC, &ts);
 		w->t_end = (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
 	}
@@ -96,10 +104,12 @@ static uint64_t cpu_busy_sum(void)
 }
 
 /* Run nthreads with common start; report wall time and per-thread intervals. */
+static uint64_t last_cpu_sum;
+
 static uint64_t run(unsigned long nthreads, int verbose)
 {
 	struct worker *w;
-	uint64_t t0, t1, tmin = ~0ULL, tmax = 0;
+	uint64_t t0, t1, tmin = ~0ULL, tmax = 0, cpu_sum = 0;
 	unsigned long i;
 
 	w = calloc(nthreads, sizeof(*w));
@@ -124,6 +134,7 @@ static uint64_t run(unsigned long nthreads, int verbose)
 	t1 = now_ns();
 
 	for (i = 0; i < nthreads; i++) {
+		cpu_sum += w[i].cpu_ns;
 		if (w[i].t_start < tmin)
 			tmin = w[i].t_start;
 		if (w[i].t_end > tmax)
@@ -134,9 +145,18 @@ static uint64_t run(unsigned long nthreads, int verbose)
 			       (long long)((w[i].t_start - t0) / 1000),
 			       (long long)((w[i].t_end - w[i].t_start) / 1000));
 	}
-	if (verbose)
-		printf("THREADSCALE:   interval_union_us=%lld wall_us=%lld\n",
-		       (long long)((tmax - tmin) / 1000), (long long)((t1 - t0) / 1000));
+	if (verbose) {
+		printf("THREADSCALE:   interval_union_us=%lld wall_us=%lld "
+		       "cpu_sum_us=%lld\n",
+		       (long long)((tmax - tmin) / 1000), (long long)((t1 - t0) / 1000),
+		       (long long)(cpu_sum / 1000));
+		/* Thread CPU time over wall time: ~1 means the threads took
+		 * turns on one CPU, ~nthreads means one CPU each.  This does
+		 * not care when a thread started, only how much CPU time it
+		 * actually burned. */
+		printf("THREADSCALE:   parallelism=%.2f\n",
+		       (t1 - t0) ? (double)cpu_sum / (double)(t1 - t0) : 0.0);
+	}
 
 	free(w);
 	return t1 - t0;

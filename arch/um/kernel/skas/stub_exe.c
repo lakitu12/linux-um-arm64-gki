@@ -68,7 +68,7 @@ noinline static void real_init(void)
 
 	res = stub_syscall6(STUB_MMAP_NR,
 			    init_data.stub_start + UM_KERN_PAGE_SIZE,
-			    STUB_DATA_PAGES * UM_KERN_PAGE_SIZE,
+			    STUB_DATA_TOTAL_PAGES * UM_KERN_PAGE_SIZE,
 			    PROT_READ | PROT_WRITE, MAP_FIXED | MAP_SHARED,
 			    init_data.stub_data_fd, init_data.stub_data_offset);
 	if (res != init_data.stub_start + UM_KERN_PAGE_SIZE)
@@ -246,7 +246,7 @@ __attribute__((naked)) void _start(void)
 	 * Since the stack after exec() starts at the top-most address,
 	 * but that's exactly where we also want to map the stub data
 	 * and code, this must:
-	 *  - push the stack by 1 code and STUB_DATA_PAGES data pages
+	 *  - push the stack by the code page and every data slot page
 	 *  - call real_init()
 	 * This way, real_init() can use the stack normally, while the
 	 * original stack further down (higher address) will become

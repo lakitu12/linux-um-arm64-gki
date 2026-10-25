@@ -25,7 +25,7 @@ extern char __syscall_stub_start[];
 
 void syscall_stub_dump_error(struct mm_id *mm_idp)
 {
-	struct stub_data *proc_data = (void *)mm_idp->stack;
+	struct stub_data *proc_data = STUB_DATA_SLOT(mm_idp, 0);
 	struct stub_syscall *sc;
 
 	if (proc_data->syscall_data_len < 0 ||
@@ -60,7 +60,7 @@ static inline unsigned long *check_init_stack(struct mm_id * mm_idp,
 					      unsigned long *stack)
 {
 	if (stack == NULL) {
-		stack = (unsigned long *) mm_idp->stack + 2;
+		stack = (unsigned long *) STUB_DATA_SLOT(mm_idp, 0) + 2;
 		*stack = 0;
 	}
 	return stack;
@@ -96,7 +96,7 @@ __initcall(init_syscall_regs);
 
 static inline long do_syscall_stub(struct mm_id *mm_idp)
 {
-	struct stub_data *proc_data = (void *)mm_idp->stack;
+	struct stub_data *proc_data = STUB_DATA_SLOT(mm_idp, 0);
 	int n, i;
 	int err, pid = mm_idp->pid;
 
@@ -167,7 +167,7 @@ int syscall_stub_flush(struct mm_id *mm_idp)
 struct stub_syscall *syscall_stub_alloc(struct mm_id *mm_idp)
 {
 	struct stub_syscall *sc;
-	struct stub_data *proc_data = (struct stub_data *) mm_idp->stack;
+	struct stub_data *proc_data = STUB_DATA_SLOT(mm_idp, 0);
 
 	if (mm_idp->syscall_data_len > 0 &&
 	    mm_idp->syscall_data_len == ARRAY_SIZE(proc_data->syscall_data))
@@ -195,7 +195,7 @@ struct stub_syscall *syscall_stub_alloc(struct mm_id *mm_idp)
  */
 int syscall_stub_free_slots(struct mm_id *mm_idp)
 {
-	struct stub_data *proc_data = (void *)mm_idp->stack;
+	struct stub_data *proc_data = STUB_DATA_SLOT(mm_idp, 0);
 
 	/* Batch is in an error state; report no room. */
 	if (mm_idp->syscall_data_len < 0)
@@ -209,7 +209,7 @@ static struct stub_syscall *syscall_stub_get_previous(struct mm_id *mm_idp,
 						      unsigned long virt)
 {
 	if (mm_idp->syscall_data_len > 0) {
-		struct stub_data *proc_data = (void *) mm_idp->stack;
+		struct stub_data *proc_data = STUB_DATA_SLOT(mm_idp, 0);
 		struct stub_syscall *sc;
 
 		sc = &proc_data->syscall_data[mm_idp->syscall_data_len - 1];
