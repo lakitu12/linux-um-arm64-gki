@@ -50,4 +50,18 @@ void *text_poke(void *addr, const void *opcode, size_t len);
 void *text_poke_copy(void *addr, const void *opcode, size_t len);
 void smp_text_poke_sync_each_cpu(void);
 
+/*
+ * With CONFIG_SMP, um_arch.c also defines these two no-op hooks (they exist
+ * for x86's module alternatives; a UML guest has no ALTERNATIVE sequences to
+ * patch). x86 declares them in <asm/alternative.h>; nothing did for arm64.
+ */
+struct module;
+
+#if IS_ENABLED(CONFIG_SMP)
+void alternatives_smp_module_add(struct module *mod, char *name,
+				 void *locks, void *locks_end,
+				 void *text,  void *text_end);
+void alternatives_smp_module_del(struct module *mod);
+#endif
+
 #endif /* __UM_ARM64_TEXT_PATCHING_H */
