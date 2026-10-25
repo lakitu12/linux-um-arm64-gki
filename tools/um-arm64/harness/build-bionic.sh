@@ -112,6 +112,16 @@ make -C "$TREE" O="$O" ARCH=um SUBARCH=arm64 LLVM=1 "${HOST_ARGS[@]}" -j"$JOBS" 
 # waiting for frames that never come.
 "$TREE"/scripts/config --file "$O/.config" -e STATIC_LINK -e UML_NET_VECTOR
 
+# SMP is on by default now that the subarch advertises it.  NR_CPUS is only a
+# compile-time ceiling for static arrays and cpumasks -- the runtime count is
+# the ncpus= boot argument, clamped to it -- so the same binary serves a host
+# that can only do one CPU (ptrace userspace clamps itself with a message) and
+# a 16-core one, with no per-host build.  NO_SMP=1 opts out for a UP kernel.
+if [ -z "${NO_SMP:-}" ]; then
+    "$TREE"/scripts/kconfig/merge_config.sh -m -O "$O" "$O/.config" \
+        "$TREE"/tools/um-arm64/config/smp.config >/dev/null || exit 2
+fi
+
 # Extra fragments, e.g. EXTRA_CONFIG="config/usb-wifi.config config/docker.config".
 # Merged before olddefconfig so their dependencies get pulled in properly.
 for frag in ${EXTRA_CONFIG:-}; do
