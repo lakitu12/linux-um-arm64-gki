@@ -6,6 +6,8 @@
 #ifndef __MM_ID_H
 #define __MM_ID_H
 
+#include <linux/compiler_types.h>
+
 #define STUB_MAX_FDS 4
 
 struct mm_id {
@@ -31,6 +33,9 @@ struct mm_id {
 #ifndef __releases
 #define __releases(x)
 #endif
+
+void enter_turnstile(struct mm_id *mm_id) __acquires(turnstile);
+void exit_turnstile(struct mm_id *mm_id) __releases(turnstile);
 
 void notify_mm_kill(int pid);
 

@@ -23,11 +23,28 @@ static_assert(sizeof(struct stub_data) == STUB_DATA_PAGES * UM_KERN_PAGE_SIZE);
 static spinlock_t mm_list_lock;
 static struct list_head mm_list;
 
+void enter_turnstile(struct mm_id *mm_id) __acquires(turnstile)
+{
+	struct mm_context *ctx = container_of(mm_id, struct mm_context, id);
+
+	mutex_lock(&ctx->turnstile);
+}
+
+void exit_turnstile(struct mm_id *mm_id) __releases(turnstile)
+{
+	struct mm_context *ctx = container_of(mm_id, struct mm_context, id);
+
+	mutex_unlock(&ctx->turnstile);
+}
+
 int init_new_context(struct task_struct *task, struct mm_struct *mm)
 {
 	struct mm_id *new_id = &mm->context.id;
 	unsigned long stack = 0;
 	int ret = -ENOMEM;
+
+	mutex_init(&mm->context.turnstile);
+	spin_lock_init(&mm->context.sync_tlb_lock);
 
 	/*
 	 * Fault-around detector starts cold: prefault_level is used as an
@@ -44,6 +61,8 @@ int init_new_context(struct task_struct *task, struct mm_struct *mm)
 	}
 
 	new_id->stack = stack;
+	new_id->syscall_data_len = 0;
+	new_id->syscall_fd_num = 0;
 
 	scoped_guard(spinlock_irqsave, &mm_list_lock) {
 		/* Insert into list, used for lookups when the child dies */
@@ -198,10 +217,6 @@ static irqreturn_t mm_sigchld_irq(int irq, void* dev)
 				/* Marks the MM as dead */
 				mm_context->id.pid = -1;
 
-				/*
-				 * NOTE: If SMP is implemented, a futex_wake
-				 * needs to be added here.
-				 */
 				stub_data = (void *)mm_context->id.stack;
 				stub_data->futex = FUTEX_IN_KERN;
 				/*
