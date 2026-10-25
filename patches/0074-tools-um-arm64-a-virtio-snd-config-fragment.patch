@@ -1,0 +1,48 @@
+From aee25e9ebabfd0398fbbbdaffb84d5eef8c39b95 Mon Sep 17 00:00:00 2001
+From: lakitu12 <1219387824@qq.com>
+Date: Sun, 25 Oct 2026 21:10:27 +0800
+Subject: [PATCH 11/11] tools/um-arm64: a virtio-snd config fragment
+
+The guest's sound card is a virtio device on the same virtio-uml transport
+the display uses (device id 25).  SOUND needs HAS_IOMEM, which on UML is
+UML_IOMEM_EMULATION's INDIRECT_IOMEM; nothing in the standard set selects
+SOUND or SND, so all of them are explicit here.  SND_VIRTIO selects SND_PCM
+and SND_JACK and needs no hardware card driver.
+
+The host half (a vhost-user device playing into Android's AAudio) lives in
+the app repo.
+---
+ tools/um-arm64/config/virtio-snd.config | 21 +++++++++++++++++++++
+ 1 file changed, 21 insertions(+)
+ create mode 100644 tools/um-arm64/config/virtio-snd.config
+
+diff --git a/tools/um-arm64/config/virtio-snd.config b/tools/um-arm64/config/virtio-snd.config
+new file mode 100644
+index 0000000..9943ce0
+--- /dev/null
++++ b/tools/um-arm64/config/virtio-snd.config
+@@ -0,0 +1,21 @@
++# virtio-snd over virtio-uml: the guest gets a real ALSA card.
++#
++# The device is instantiated from the kernel command line with
++#   virtio_uml.device=<socket path>:25     (25 = VIRTIO_ID_SOUND)
++# and the host end is the app-side backend (uml-android app/audio/vusnd.c), a
++# vhost-user device that plays the PCM into Android's AAudio.
++#
++# Gates, checked on this tree:
++#   - SOUND depends on HAS_IOMEM || INDIRECT_IOMEM. UML defaults to
++#     NO_IOMEM=y; UML_IOMEM_EMULATION selects INDIRECT_IOMEM and clears it.
++#   - Nothing in the standard fragment set selects SOUND, so both levels are
++#     explicit here.
++#   - SND_VIRTIO selects SND_PCM and SND_JACK. No hardware card driver is
++#     needed: the virtio device *is* the card.
++#   - SND_PCM_TIMER stays at its default (y); the virtio-snd driver's
++#     elapsed_period work relies on ALSA's timer.
++CONFIG_UML_IOMEM_EMULATION=y
++CONFIG_SOUND=y
++CONFIG_SND=y
++CONFIG_SND_PCM=y
++CONFIG_SND_VIRTIO=y
+-- 
+2.53.0
+

@@ -1,0 +1,39 @@
+From 70fe4b93e83c8fd41051e6a56bb95cc86b79405c Mon Sep 17 00:00:00 2001
+From: lakitu12 <1219387824@qq.com>
+Date: Mon, 19 Oct 2026 09:42:19 +0800
+Subject: [PATCH 10/11] tools/um-arm64: sync the umfb.config header with the
+ gki-public copy
+
+Comment-only: the fragment now says fd (not memfd) and states that this
+stack carries no fb-vfb route, matching ci/umfb.config in the CI repo.
+Config values are unchanged.
+---
+ tools/um-arm64/config/umfb.config | 10 +++++-----
+ 1 file changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/tools/um-arm64/config/umfb.config b/tools/um-arm64/config/umfb.config
+index fd5b007..c877aaf 100644
+--- a/tools/um-arm64/config/umfb.config
++++ b/tools/um-arm64/config/umfb.config
+@@ -1,13 +1,13 @@
+ # UML display: a framebuffer whose changed tiles are mirrored into a
+-# host file or memfd, where viewers pick them up (tools/um-arm64/umview
+-# on Linux; the console app on Android).  It activates with
++# host file or fd, where viewers pick them up -- umview on Linux
++# (tools/um-arm64/umview), the console app's display screen on Android.
++# It activates with
+ #   umlfb=<path|fd:N>:<W>x<H>[-32][,hz=N][,tile=N]
+ # on the guest kernel command line and stays dormant without it.
+ #
+ # FB (the driver framework) sits behind HAS_IOMEM, which UML turns off
+-# by default: UML_IOMEM_EMULATION opens that gate -- the same one the
+-# fb-vfb fragment carries, so a build that has either fragment can see
+-# the fbdev menu.  (Keep both if video=vfb: is also in use.)
++# by default: UML_IOMEM_EMULATION opens that gate.  This stack carries
++# no fb-vfb route, so umfb is the only fbdev provider here.
+ CONFIG_UML_IOMEM_EMULATION=y
+ CONFIG_FB=y
+ CONFIG_FB_DEVICE=y
+-- 
+2.53.0
+
