@@ -176,6 +176,32 @@ struct stub_data {
 };
 
 /*
+ * Slot control words, at the bottom of the slot's stack area (as-layout.h).
+ *
+ *   ctl  written by the stub thread, read by the kernel:
+ *          IDLE     the thread has not reached its parking code yet
+ *          SETUP    its own signal stack is installed, ready for work
+ *          PARKING  it is about to make the trap that parks it
+ *        The kernel only ever counts PARKING, so a slot that stopped in
+ *        SETUP is visibly different from one that never started.
+ *   go   written by the kernel, read by the stub thread: "this mm is ready
+ *        for you".  A thread that parked before the initial handshake
+ *        completed would be a stub trap the kernel is not waiting for -- the
+ *        handshake looks only at slot 0 -- so the pool is released explicitly
+ *        instead of racing the first trap.
+ *
+ * Plain words on purpose: both sides already order against the futex handoff,
+ * and a stale read here costs a bounded spin, never a lost wakeup.
+ */
+#define STUB_SLOT_WORDS_AT(base) \
+	((volatile unsigned int *)((base) + STUB_DATA_PAGES * UM_KERN_PAGE_SIZE))
+#define STUB_SLOT_CTL_AT(base)	(STUB_SLOT_WORDS_AT(base))
+#define STUB_SLOT_GO_AT(base)	(STUB_SLOT_WORDS_AT(base) + 1)
+#define STUB_CTL_IDLE		0
+#define STUB_CTL_PARKING	1
+#define STUB_CTL_SETUP		2
+
+/*
  * Slot @slot of mm @id: the slot region starts at STUB_DATA (the code page's
  * neighbour) and slots are STUB_SLOT_SIZE apart.  mm_id->stack is the kernel's
  * mapping of that region, so this is also the pointer the stub process sees.

@@ -65,8 +65,28 @@
  * mode nobody wants to debug.
  */
 #define STUB_MAX_SLOTS 8
-#define STUB_SLOT_SIZE (STUB_DATA_PAGES * UM_KERN_PAGE_SIZE)
-#define STUB_DATA_TOTAL_PAGES (STUB_DATA_PAGES * STUB_MAX_SLOTS)
+/*
+ * A slot is the stub_data (handoff word, register save area, pending syscall
+ * queue, signal stack) plus a stack for the stub thread that owns it.  The
+ * thread needs a stack of its own while it is parked waiting for work; the
+ * guest's own stack is not usable until the kernel has handed it a context.
+ *
+ * The stack area is not optional bookkeeping.  Without it the thread's initial
+ * stack pointer sits at the top of the slot, i.e. inside sigstack[], and the
+ * very first SIGSYS frame the host writes there (4.6 KB on arm64) lands on top
+ * of the thread's live frames.  That happens to survive a thread that parks
+ * forever, which is exactly why it would have been found much later, by a
+ * handler that returned.
+ *
+ * It also gives the slot's control words a home: they live at the bottom of
+ * the stack area, far below any frame this thread will ever use.
+ *
+ * STUB_DATA_PAGES is a power of two, so the slot stays one.
+ */
+#define STUB_SLOT_STACK_PAGES STUB_DATA_PAGES
+#define STUB_SLOT_PAGES (STUB_DATA_PAGES + STUB_SLOT_STACK_PAGES)
+#define STUB_SLOT_SIZE (STUB_SLOT_PAGES * UM_KERN_PAGE_SIZE)
+#define STUB_DATA_TOTAL_PAGES (STUB_SLOT_PAGES * STUB_MAX_SLOTS)
 
 /*
  * Where the slot region starts.

@@ -76,6 +76,17 @@ pid_t os_reap_child(void)
 	return waitpid(-1, &status, WNOHANG);
 }
 
+/*
+ * Same, but hands the wait status back.  Callers that need to know *how* a
+ * stub died (a signal number, an exit code) rather than merely that it did
+ * are otherwise left guessing; the stub's death is the one event in SECCOMP
+ * mode that cannot be observed from inside the kernel.
+ */
+pid_t os_reap_child_status(int *status)
+{
+	return waitpid(-1, status, WNOHANG);
+}
+
 /* Don't use the glibc version, which caches the result in TLS. It misses some
  * syscalls, and also breaks with clone(), which does not unshare the TLS.
  */

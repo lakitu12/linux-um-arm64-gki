@@ -14,6 +14,8 @@ struct mm_id {
 	int pid;
 	unsigned long stack;
 	int syscall_data_len;
+	/* Task slots whose stub thread has parked (docs §12.35). */
+	int slots_ready;
 
 	/* Only used with SECCOMP mode */
 	int sock;

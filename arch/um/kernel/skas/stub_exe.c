@@ -10,6 +10,136 @@
 
 void _start(void);
 
+/*
+ * Per-task stub threads (docs §12.35).
+ *
+ * One stub process per mm used to hold exactly one stub thread, and every guest
+ * thread of that mm took turns on it.  The slot work turns that into a pool: the
+ * first stub thread spawns STUB_MAX_SLOTS-1 more before the seccomp filter goes
+ * in, each gets a stack inside its own slot, and each parks in the SIGSYS
+ * handler waiting for the kernel to hand it a guest context.
+ *
+ * clone() cannot be called after the filter is installed: a syscall issued from
+ * the stub's code page is checked against the filter's whitelist, and clone is
+ * not on it -- KILL_PROCESS, not TRAP.  That is also why these threads park by
+ * making a syscall from the *exec'd image*, which is outside the stub's code
+ * page and therefore traps: exactly how real_init itself enters the handler.
+ *
+ * The slot a thread owns needs no argument: its stack lives inside the slot, so
+ * get_stub_data() derives the slot from SP (as-layout.h).
+ */
+#define UML_CLONE_VM		0x00000100
+#define UML_CLONE_FS		0x00000200
+#define UML_CLONE_FILES		0x00000400
+#define UML_CLONE_SIGHAND	0x00000800
+#define UML_CLONE_THREAD	0x00010000
+#define UML_CLONE_SYSVSEM	0x00040000
+#define UML_STUB_CLONE_FLAGS	(UML_CLONE_VM | UML_CLONE_FS | UML_CLONE_FILES | \
+				 UML_CLONE_SIGHAND | UML_CLONE_THREAD | \
+				 UML_CLONE_SYSVSEM)
+
+/*
+ * What a new stub thread does before parking: its own signal stack (per-thread,
+ * inside its slot), then a wait for the kernel's go-ahead, then a syscall from
+ * outside the stub page, which traps into the SIGSYS handler and parks it there.
+ *
+ * The wait matters.  Parking is a stub trap, and the kernel's startup handshake
+ * only ever watches slot 0; a thread that parks before that handshake finished
+ * is a trap nobody is waiting for, and the kernel's view of the stub process
+ * would be whatever slot 0 happened to contain.  The go word lives in the
+ * slot, so the kernel writes it after start_userspace() has returned.
+ */
+noinline static void stub_thread_setup(struct stub_data *d)
+{
+	volatile unsigned int *ctl = STUB_SLOT_CTL_AT((unsigned long)d);
+	struct {
+		void  *ss_sp;
+		int    ss_flags;
+		size_t ss_size;
+	} stack = {
+		.ss_sp = (void *)d->sigstack,
+		.ss_size = sizeof(d->sigstack),
+	};
+
+	stub_arch_init();
+	stub_syscall2(__NR_sigaltstack, (unsigned long)&stack, 0);
+
+	/*
+	 * Announce the slot, then wait for the go word.  Plain store, no
+	 * compare-exchange: the kernel only writes go *after* it has observed
+	 * SETUP, so this store is already ordered before that write by the
+	 * kernel's own read.  (Also: __atomic_* on aarch64 would pull in
+	 * libatomic, which a -nostdlib stub does not link against.)
+	 */
+	*ctl = STUB_CTL_SETUP;
+	while (!*(volatile unsigned int *)STUB_SLOT_GO_AT((unsigned long)d))
+		__asm__ volatile("yield" ::: "memory");
+
+	/* Tell the kernel this trap is a thread parking, not a guest syscall. */
+	*ctl = STUB_CTL_PARKING;
+
+	/* Outside the stub page: the filter traps it, the handler parks us and
+	 * waits for the kernel to hand this slot a guest context. */
+	stub_syscall1(__NR_exit, 31);
+	stub_syscall1(__NR_exit_group, 31);
+}
+
+/*
+ * Wait until every spawned thread has announced itself (SETUP) before the
+ * seccomp filter goes in.
+ *
+ * This is not a nicety: a stub thread's own setup still makes ordinary
+ * syscalls -- prctl for PAC, sigaltstack -- and those come from the exec'd
+ * image, which the filter turns into a trap.  A thread that reaches sigaltstack
+ * after the filter is installed parks in the SIGSYS handler *before* it can
+ * announce its slot, so the kernel never sees the slot and, worse, the thread
+ * sits in the handler with no slot of its own.  Measured exactly that way:
+ * every slot ended up with "ctl=0 futex=0x3", i.e. parked without a name.
+ *
+ * The bound is real time, not iterations: if a thread never shows up (clone
+ * refused, or it died), the boot pays one timeout and carries on with the
+ * slots it got.
+ */
+noinline static void wait_stub_threads_ready(unsigned long slot_base)
+{
+	unsigned long start = stub_cycles();
+	unsigned long budget = 20000UL * stub_cycles_per_us();	/* 20 ms */
+	int i;
+
+	for (i = 1; i < STUB_MAX_SLOTS; i++) {
+		struct stub_data *d = (void *)(slot_base +
+					       (unsigned long)i * STUB_SLOT_SIZE);
+		volatile unsigned int *ctl = STUB_SLOT_CTL_AT((unsigned long)d);
+
+		while (*ctl != STUB_CTL_SETUP) {
+			__asm__ volatile("yield" ::: "memory");
+			if (stub_cycles() - start > budget)
+				return;
+		}
+	}
+}
+
+noinline static void spawn_stub_threads(unsigned long slot_base)
+{
+	int i;
+
+	for (i = 1; i < STUB_MAX_SLOTS; i++) {
+		unsigned long base = slot_base + (unsigned long)i * STUB_SLOT_SIZE;
+		unsigned long stack_top = base + STUB_SLOT_SIZE - 16;
+		long res;
+
+		res = stub_syscall5(__NR_clone, UML_STUB_CLONE_FLAGS,
+				    stack_top, 0, 0, 0);
+		if (res == 0) {
+			/* Child: SP is inside slot i's stack area, so the slot
+			 * is derived from it -- no argument needed. */
+			stub_thread_setup(get_stub_data());
+			stub_syscall1(__NR_exit, 32);
+		}
+	}
+}
+
+
 noinline static void real_init(void)
 {
 	struct stub_init_data init_data;
@@ -81,8 +211,18 @@ noinline static void real_init(void)
 			stub_syscall1(__NR_exit, 13);
 	}
 
-	/* setup signal stack inside slot 0 of the stub data */
-	stack.ss_sp = (void *)init_data.stub_start + STUB_DATA_OFFSET;
+	/*
+	 * setup signal stack inside slot 0 of the stub data: the same sigstack
+	 * every other stub thread uses, so slot 0 can never be an exception
+	 * when a frame is written.
+	 */
+	{
+		struct stub_data *d0 = (void *)((unsigned long)init_data.stub_start +
+						STUB_DATA_OFFSET);
+
+		stack.ss_sp = (void *)d0->sigstack;
+		stack.ss_size = sizeof(d0->sigstack);
+	}
 	stub_syscall2(__NR_sigaltstack, (unsigned long)&stack, 0);
 
 	/* register signal handlers */
@@ -129,6 +269,22 @@ noinline static void real_init(void)
 				    (unsigned long)&sa, 0, sizeof(sa.sa_mask));
 		if (res != 0)
 			stub_syscall1(__NR_exit, 20);
+	}
+
+	/*
+	 * Spawn the rest of the stub thread pool now: clone is only callable
+	 * while no filter is installed, and the threads must exist before
+	 * TSYNC so the filter covers them in one go.
+	 */
+#ifndef STUB_SPAWN
+#define STUB_SPAWN 0
+#endif
+	if (init_data.seccomp && STUB_SPAWN) {
+		unsigned long slots = init_data.stub_start + STUB_DATA_OFFSET;
+
+		spawn_stub_threads(slots);
+		/* Their setup syscalls must run before the filter exists. */
+		wait_stub_threads_ready(slots);
 	}
 
 	/*
@@ -228,7 +384,11 @@ noinline static void real_init(void)
 				  (unsigned long)&prog) != 0)
 			stub_syscall1(__NR_exit, 21);
 
-		/* Fall through, the exit syscall will cause SIGSYS */
+		/*
+		 * Fall through, the exit syscall will cause SIGSYS.  The pool
+		 * is released by the kernel, not from here: see
+		 * stub_thread_setup().
+		 */
 	} else {
 		stub_syscall4(__NR_ptrace, PTRACE_TRACEME, 0, 0, 0);
 

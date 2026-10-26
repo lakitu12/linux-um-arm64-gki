@@ -7,6 +7,8 @@
 #include <linux/mm.h>
 #include <linux/sched/signal.h>
 #include <linux/slab.h>
+#include <linux/ktime.h>
+#include <linux/wait.h>
 
 #include <shared/irq_kern.h>
 #include <asm/pgalloc.h>
@@ -18,8 +20,8 @@
 #include <stub-data.h>
 
 /* Ensure the stub_data struct covers the allocated area */
-/* Ensure one slot of the allocated region covers a whole struct stub_data */
-static_assert(sizeof(struct stub_data) == STUB_SLOT_SIZE);
+/* The data part of a slot must cover a whole struct stub_data */
+static_assert(sizeof(struct stub_data) == STUB_DATA_PAGES * UM_KERN_PAGE_SIZE);
 
 static spinlock_t mm_list_lock;
 static struct list_head mm_list;
@@ -38,11 +40,13 @@ void exit_turnstile(struct mm_id *mm_id) __releases(turnstile)
 	mutex_unlock(&ctx->turnstile);
 }
 
+static bool slot_report_done;
+
 int init_new_context(struct task_struct *task, struct mm_struct *mm)
 {
 	struct mm_id *new_id = &mm->context.id;
 	unsigned long stack = 0;
-	int ret = -ENOMEM;
+	int i, ret = -ENOMEM;
 
 	mutex_init(&mm->context.turnstile);
 	spin_lock_init(&mm->context.sync_tlb_lock);
@@ -76,6 +80,65 @@ int init_new_context(struct task_struct *task, struct mm_struct *mm)
 		printk(KERN_ERR "%s: start_userspace failed: %d\n",
 		       __func__, ret);
 		goto out_free;
+	}
+
+	/*
+	 * The stub thread pool.  Each extra slot has a thread that announced
+	 * itself before the seccomp filter went in and is now parked on the go
+	 * word in its slot; releasing that word is a latch, not a handshake, so
+	 * it happens for every slot up front.  A thread that has not been
+	 * scheduled yet simply finds the word already set when it gets there.
+	 *
+	 * Never leave one unreleased: a released slot parks, an unreleased one
+	 * spins for as long as the mm lives, and the guest would pay for it as
+	 * stolen host CPUs.
+	 */
+	for (i = 1; i < STUB_MAX_SLOTS; i++) {
+		struct stub_data *sd = STUB_DATA_SLOT(new_id, i);
+
+		WRITE_ONCE(*STUB_SLOT_GO_AT((unsigned long)sd), 1u);
+	}
+	smp_wmb();
+
+	/*
+	 * Best-effort census, for the one line below and for a person reading
+	 * a boot log.  The pool is an optimisation, so nothing here blocks the
+	 * mm: a thread that is slow to be scheduled is counted next time.
+	 */
+	new_id->slots_ready = 1;	/* slot 0 is the exec'd stub thread */
+	if (!slot_report_done) {
+		unsigned long long deadline = ktime_get_ns() +
+					       20ull * NSEC_PER_MSEC;
+
+		do {
+			new_id->slots_ready = 1;
+			for (i = 1; i < STUB_MAX_SLOTS; i++) {
+				struct stub_data *sd = STUB_DATA_SLOT(new_id, i);
+
+				if (READ_ONCE(*STUB_SLOT_CTL_AT((unsigned long)sd)) ==
+						STUB_CTL_PARKING &&
+				    STUB_FUTEX_OWNER(READ_ONCE(sd->futex)) ==
+						FUTEX_IN_KERN)
+					new_id->slots_ready++;
+			}
+			if (new_id->slots_ready == STUB_MAX_SLOTS)
+				break;
+			cpu_relax();
+		} while (ktime_get_ns() < deadline);
+
+		slot_report_done = true;
+		printk(KERN_INFO "stub: %d of %d task slots parked for the first mm\n",
+		       new_id->slots_ready, STUB_MAX_SLOTS);
+		if (new_id->slots_ready != STUB_MAX_SLOTS) {
+			for (i = 1; i < STUB_MAX_SLOTS; i++) {
+				struct stub_data *sd = STUB_DATA_SLOT(new_id, i);
+
+				printk(KERN_INFO "stub: slot %d ctl=%u futex=0x%x\n",
+				       i,
+				       READ_ONCE(*STUB_SLOT_CTL_AT((unsigned long)sd)),
+				       READ_ONCE(sd->futex));
+			}
+		}
 	}
 
 	/* Ensure the new MM is clean and nothing unwanted is mapped */
@@ -193,10 +256,11 @@ static irqreturn_t mm_sigchld_irq(int irq, void* dev)
 {
 	struct mm_context *mm_context;
 	pid_t pid;
+	int status;
 
 	guard(spinlock)(&mm_list_lock);
 
-	while ((pid = os_reap_child()) > 0) {
+	while ((pid = os_reap_child_status(&status)) > 0) {
 		/*
 		 * Most reaped children are stubs destroy_context() killed and
 		 * handed over rather than waited for. Release those first; the
@@ -215,6 +279,15 @@ static irqreturn_t mm_sigchld_irq(int irq, void* dev)
 			if (mm_context->id.pid == pid) {
 				struct stub_data *stub_data;
 				printk("Unexpectedly lost MM child! Affected tasks will segfault.");
+				/* Raw wait(2) encoding: low 7 bits are the
+				 * signal, bits 8..15 the exit code. glibc's
+				 * W* macros are not in scope here. */
+				if (status & 0x7f)
+					printk(KERN_ERR "stub %d was killed by signal %d\n",
+					       pid, status & 0x7f);
+				else
+					printk(KERN_ERR "stub %d exited with %d\n",
+					       pid, (status >> 8) & 0xff);
 
 				/* Marks the MM as dead */
 				mm_context->id.pid = -1;
