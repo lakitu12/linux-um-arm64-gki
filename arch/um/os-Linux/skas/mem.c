@@ -23,24 +23,26 @@
 
 extern char __syscall_stub_start[];
 
+/* How many flushes had to run inside a user-mode entry (docs §12.35.7.3). */
+static int flush_inside_entry;
+
 void syscall_stub_dump_error(struct mm_id *mm_idp)
 {
-	struct stub_data *proc_data = STUB_DATA_SLOT(mm_idp, 0);
 	struct stub_syscall *sc;
+	int len = mm_idp->syscall_data_len;
 
-	if (proc_data->syscall_data_len < 0 ||
-	    proc_data->syscall_data_len >= ARRAY_SIZE(proc_data->syscall_data))
+	if (len < 0 || len > STUB_QUEUE_MAX)
 		panic("Syscall data was corrupted by stub (len is: %d, expected maximum: %d)!",
-			proc_data->syscall_data_len,
-			mm_idp->syscall_data_len);
+			len, STUB_QUEUE_MAX);
 
-	sc = &proc_data->syscall_data[proc_data->syscall_data_len];
+	sc = len == STUB_QUEUE_MAX ? &mm_idp->queue[STUB_QUEUE_MAX - 1] :
+				    &mm_idp->queue[len];
 
 	printk(UM_KERN_ERR "%s : length = %d, last offset = %d",
-		__func__, mm_idp->syscall_data_len,
-		proc_data->syscall_data_len);
+		__func__, len, (int)(sc - mm_idp->queue));
+
 	printk(UM_KERN_ERR "%s : stub syscall type %d failed, return value = 0x%lx\n",
-		__func__, sc->syscall, proc_data->err);
+		__func__, sc->syscall, (unsigned long)sc->mem.addr);
 
 	print_hex_dump(UM_KERN_ERR, "    syscall data: ", 0,
 		       16, 4, sc, sizeof(*sc), 0);
@@ -94,14 +96,73 @@ static int __init init_syscall_regs(void)
 
 __initcall(init_syscall_regs);
 
-static inline long do_syscall_stub(struct mm_id *mm_idp)
+/*
+ * Hand the pending batch to the control slot and wait for it to be applied.
+ *
+ * Called when the batch is full or on an explicit flush, never on the fast
+ * path: the fast path ships the batch together with the guest's registers, so
+ * applying it costs no extra handoff.
+ *
+ * "Control slot" is slot 0, which no task runs guest code on.  Exactly one
+ * caller may use it at a time, so this takes the mm's control lock -- and it
+ * does so *without* expecting the batch lock to be held, because it has to
+ * block.
+ */
+static long do_syscall_stub(struct mm_id *mm_idp)
 {
 	struct stub_data *proc_data = STUB_DATA_SLOT(mm_idp, 0);
+	unsigned long flags;
+	int nested, took_turnstile;
 	int n, i;
 	int err, pid = mm_idp->pid;
 
-	/* Inform process how much we have filled in. */
-	proc_data->syscall_data_len = mm_idp->syscall_data_len;
+	/*
+	 * The turnstile may already be held, and by this very task.
+	 *
+	 * With the pool live, a normal entry no longer takes it -- that is the
+	 * point -- so the control slot needs its own exclusion and this takes
+	 * the turnstile here.  But a flush can also be requested from *inside*
+	 * a user-mode entry: the serialised configuration holds the turnstile
+	 * across the whole entry, and the fault path that fills the batch runs
+	 * in that same task.  A mutex is not recursive, so re-taking it there
+	 * is a self-deadlock, and one that only shows up under a workload that
+	 * fills the batch -- measured: X + glamor guests stopped with Xorg's
+	 * startup wedged (docs §12.35.7.3).
+	 *
+	 * So take it only when the task is not already inside an entry, and
+	 * remember whether it was taken.  Order is always turnstile -> control
+	 * lock, and it is never held while the batch lock is.
+	 */
+	nested = mm_idp->turnstile_owner == gettid();
+	took_turnstile = using_seccomp && !nested;
+	if (took_turnstile) {
+		enter_turnstile(mm_idp);
+		mm_idp->turnstile_owner = gettid();
+	}
+	if (nested && flush_inside_entry++ < 3)
+		printk(UM_KERN_INFO "stub: flush on the control slot from inside an entry (tid %d)\n",
+		       gettid());
+	stub_control_lock(mm_idp);
+
+	/*
+	 * Move the batch to the control slot.  Copying rather than sharing is
+	 * what lets the batch live in the mm: on the fast path the same batch
+	 * is copied into a *task* slot instead, and the copy is what makes the
+	 * two uses independent.
+	 */
+	stub_queue_lock(mm_idp, &flags);
+	n = mm_idp->syscall_data_len;
+	if (n > 0) {
+		memcpy(proc_data->syscall_data, mm_idp->queue,
+		       n * sizeof(mm_idp->queue[0]));
+		memcpy(mm_idp->slot_fd_map[0], mm_idp->syscall_fd_map,
+		       sizeof(mm_idp->syscall_fd_map));
+		mm_idp->slot_fd_num[0] = mm_idp->syscall_fd_num;
+		mm_idp->syscall_data_len = 0;
+		mm_idp->syscall_fd_num = 0;
+	}
+	proc_data->syscall_data_len = n;
+	stub_queue_unlock(mm_idp, flags);
 
 	if (using_seccomp) {
 		proc_data->restart_wait = 1;
@@ -129,60 +190,54 @@ static inline long do_syscall_stub(struct mm_id *mm_idp)
 	 * In that case, syscall_data_len points to the last executed syscall,
 	 * otherwise it will be zero (but we do not need to rely on that).
 	 */
+	stub_queue_lock(mm_idp, &flags);
 	if (proc_data->err < 0) {
+		mm_idp->syscall_data_len = n;
+		stub_queue_unlock(mm_idp, flags);
 		syscall_stub_dump_error(mm_idp);
 
 		/* Store error code in case someone tries to add more syscalls */
+		stub_queue_lock(mm_idp, &flags);
 		mm_idp->syscall_data_len = proc_data->err;
+		mm_idp->syscall_fd_num = 0;
 	} else {
 		mm_idp->syscall_data_len = 0;
-	}
-
-	if (using_seccomp)
 		mm_idp->syscall_fd_num = 0;
+	}
+	stub_queue_unlock(mm_idp, flags);
+
+	stub_control_unlock(mm_idp);
+	if (took_turnstile) {
+		mm_idp->turnstile_owner = 0;
+		exit_turnstile(mm_idp);
+	}
 
 	return mm_idp->syscall_data_len;
 }
 
 int syscall_stub_flush(struct mm_id *mm_idp)
 {
-	int res;
+	unsigned long flags;
 
-	if (mm_idp->syscall_data_len == 0)
+	stub_queue_lock(mm_idp, &flags);
+
+	if (mm_idp->syscall_data_len == 0) {
+		stub_queue_unlock(mm_idp, flags);
 		return 0;
+	}
 
 	/* If an error happened already, report it and reset the state. */
 	if (mm_idp->syscall_data_len < 0) {
-		res = mm_idp->syscall_data_len;
+		int res = mm_idp->syscall_data_len;
+
 		mm_idp->syscall_data_len = 0;
+		stub_queue_unlock(mm_idp, flags);
 		return res;
 	}
 
-	res = do_syscall_stub(mm_idp);
-	mm_idp->syscall_data_len = 0;
+	stub_queue_unlock(mm_idp, flags);
 
-	return res;
-}
-
-struct stub_syscall *syscall_stub_alloc(struct mm_id *mm_idp)
-{
-	struct stub_syscall *sc;
-	struct stub_data *proc_data = STUB_DATA_SLOT(mm_idp, 0);
-
-	if (mm_idp->syscall_data_len > 0 &&
-	    mm_idp->syscall_data_len == ARRAY_SIZE(proc_data->syscall_data))
-		do_syscall_stub(mm_idp);
-
-	if (mm_idp->syscall_data_len < 0) {
-		/* Return dummy to retain error state. */
-		sc = &proc_data->syscall_data[0];
-	} else {
-		sc = &proc_data->syscall_data[mm_idp->syscall_data_len];
-		mm_idp->syscall_data_len += 1;
-	}
-	memset(sc, 0, sizeof(*sc));
-
-	return sc;
+	return do_syscall_stub(mm_idp);
 }
 
 /*
@@ -195,24 +250,28 @@ struct stub_syscall *syscall_stub_alloc(struct mm_id *mm_idp)
  */
 int syscall_stub_free_slots(struct mm_id *mm_idp)
 {
-	struct stub_data *proc_data = STUB_DATA_SLOT(mm_idp, 0);
+	unsigned long flags;
+	int len;
+
+	stub_queue_lock(mm_idp, &flags);
+	len = mm_idp->syscall_data_len;
+	stub_queue_unlock(mm_idp, flags);
 
 	/* Batch is in an error state; report no room. */
-	if (mm_idp->syscall_data_len < 0)
+	if (len < 0)
 		return 0;
 
-	return ARRAY_SIZE(proc_data->syscall_data) - mm_idp->syscall_data_len;
+	return STUB_QUEUE_MAX - len;
 }
 
-static struct stub_syscall *syscall_stub_get_previous(struct mm_id *mm_idp,
-						      int syscall_type,
-						      unsigned long virt)
+/* The last entry, if it is the same kind of call and contiguous with @virt. */
+static struct stub_syscall *queue_previous(struct mm_id *mm_idp,
+					   int syscall_type,
+					   unsigned long virt)
 {
 	if (mm_idp->syscall_data_len > 0) {
-		struct stub_data *proc_data = STUB_DATA_SLOT(mm_idp, 0);
-		struct stub_syscall *sc;
-
-		sc = &proc_data->syscall_data[mm_idp->syscall_data_len - 1];
+		struct stub_syscall *sc =
+			&mm_idp->queue[mm_idp->syscall_data_len - 1];
 
 		if (sc->syscall == syscall_type &&
 		    sc->mem.addr + sc->mem.length == virt)
@@ -222,92 +281,137 @@ static struct stub_syscall *syscall_stub_get_previous(struct mm_id *mm_idp,
 	return NULL;
 }
 
-static int get_stub_fd(struct mm_id *mm_idp, int fd)
+/* Commit one entry; the caller holds the batch lock. */
+static void queue_push(struct mm_id *mm_idp, struct stub_syscall *sc)
+{
+	mm_idp->queue[mm_idp->syscall_data_len] = *sc;
+	mm_idp->syscall_data_len++;
+}
+
+/*
+ * Reserve a descriptor index for @fd, or flush and start a new map.
+ *
+ * Called with the batch lock held; returns -1 if the caller has to flush
+ * first, which is the only reason it cannot just do the work.  The index is
+ * into mm_idp->syscall_fd_map, which the handoff copies to the running slot's
+ * list and then sends over that slot's socket.
+ */
+static int resolve_stub_fd(struct mm_id *mm_idp, int fd)
 {
 	int i;
 
-	/* Find an FD slot (or flush and use first) */
 	if (!using_seccomp)
 		return fd;
 
-	/* Already crashed, value does not matter */
-	if (mm_idp->syscall_data_len < 0)
-		return 0;
-
-	/* Find existing FD in map if we can allocate another syscall */
-	if (mm_idp->syscall_data_len <
-	    ARRAY_SIZE(((struct stub_data *)NULL)->syscall_data)) {
-		for (i = 0; i < mm_idp->syscall_fd_num; i++) {
-			if (mm_idp->syscall_fd_map[i] == fd)
-				return i;
-		}
-
-		if (mm_idp->syscall_fd_num < STUB_MAX_FDS) {
-			i = mm_idp->syscall_fd_num;
-			mm_idp->syscall_fd_map[i] = fd;
-
-			mm_idp->syscall_fd_num++;
-
+	for (i = 0; i < mm_idp->syscall_fd_num; i++) {
+		if (mm_idp->syscall_fd_map[i] == fd)
 			return i;
-		}
 	}
 
-	/* FD map full or no syscall space available, continue after flush */
-	do_syscall_stub(mm_idp);
-	mm_idp->syscall_fd_map[0] = fd;
-	mm_idp->syscall_fd_num = 1;
+	if (mm_idp->syscall_fd_num == STUB_MAX_FDS)
+		return -1;
 
-	return 0;
+	i = mm_idp->syscall_fd_num++;
+	mm_idp->syscall_fd_map[i] = fd;
+
+	return i;
 }
 
 int map(struct mm_id *mm_idp, unsigned long virt, unsigned long len, int prot,
 	int phys_fd, unsigned long long offset)
 {
-	struct stub_syscall *sc;
+	unsigned long flags;
 
-	/* Compress with previous syscall if that is possible */
-	sc = syscall_stub_get_previous(mm_idp, STUB_SYSCALL_MMAP, virt);
-	if (sc && sc->mem.prot == prot &&
-	    sc->mem.offset == MMAP_OFFSET(offset - sc->mem.length)) {
-		int prev_fd = sc->mem.fd;
+	for (;;) {
+		struct stub_syscall *sc, entry;
+		int idx;
 
-		if (using_seccomp)
-			prev_fd = mm_idp->syscall_fd_map[sc->mem.fd];
+		stub_queue_lock(mm_idp, &flags);
 
-		if (phys_fd == prev_fd) {
-			sc->mem.length += len;
-			return 0;
+		/* The batch is in an error state; drop the call, the flush
+		 * that set it was already reported. */
+		if (mm_idp->syscall_data_len < 0) {
+			stub_queue_unlock(mm_idp, flags);
+			return mm_idp->syscall_data_len;
 		}
+
+		/* Compress with the previous call if that is possible */
+		sc = queue_previous(mm_idp, STUB_SYSCALL_MMAP, virt);
+		if (sc && sc->mem.prot == prot &&
+		    sc->mem.offset == MMAP_OFFSET(offset - sc->mem.length)) {
+			int prev_fd = sc->mem.fd;
+
+			if (using_seccomp)
+				prev_fd = mm_idp->syscall_fd_map[sc->mem.fd];
+
+			if (phys_fd == prev_fd) {
+				sc->mem.length += len;
+				stub_queue_unlock(mm_idp, flags);
+				return 0;
+			}
+		}
+
+		if (mm_idp->syscall_data_len == STUB_QUEUE_MAX) {
+			stub_queue_unlock(mm_idp, flags);
+			do_syscall_stub(mm_idp);
+			continue;
+		}
+
+		idx = resolve_stub_fd(mm_idp, phys_fd);
+		if (idx < 0) {
+			/* Descriptor list full: flush, then start a new batch. */
+			stub_queue_unlock(mm_idp, flags);
+			do_syscall_stub(mm_idp);
+			continue;
+		}
+
+		entry.syscall = STUB_SYSCALL_MMAP;
+		entry.mem.addr = virt;
+		entry.mem.length = len;
+		entry.mem.prot = prot;
+		entry.mem.fd = idx;
+		entry.mem.offset = MMAP_OFFSET(offset);
+		queue_push(mm_idp, &entry);
+
+		stub_queue_unlock(mm_idp, flags);
+		return 0;
 	}
-
-	phys_fd = get_stub_fd(mm_idp, phys_fd);
-
-	sc = syscall_stub_alloc(mm_idp);
-	sc->syscall = STUB_SYSCALL_MMAP;
-	sc->mem.addr = virt;
-	sc->mem.length = len;
-	sc->mem.prot = prot;
-	sc->mem.fd = phys_fd;
-	sc->mem.offset = MMAP_OFFSET(offset);
-
-	return 0;
 }
 
 int unmap(struct mm_id *mm_idp, unsigned long addr, unsigned long len)
 {
-	struct stub_syscall *sc;
+	unsigned long flags;
 
-	/* Compress with previous syscall if that is possible */
-	sc = syscall_stub_get_previous(mm_idp, STUB_SYSCALL_MUNMAP, addr);
-	if (sc) {
-		sc->mem.length += len;
+	for (;;) {
+		struct stub_syscall *sc, entry;
+
+		stub_queue_lock(mm_idp, &flags);
+
+		if (mm_idp->syscall_data_len < 0) {
+			stub_queue_unlock(mm_idp, flags);
+			return mm_idp->syscall_data_len;
+		}
+
+		/* Compress with the previous call if that is possible */
+		sc = queue_previous(mm_idp, STUB_SYSCALL_MUNMAP, addr);
+		if (sc) {
+			sc->mem.length += len;
+			stub_queue_unlock(mm_idp, flags);
+			return 0;
+		}
+
+		if (mm_idp->syscall_data_len == STUB_QUEUE_MAX) {
+			stub_queue_unlock(mm_idp, flags);
+			do_syscall_stub(mm_idp);
+			continue;
+		}
+
+		entry.syscall = STUB_SYSCALL_MUNMAP;
+		entry.mem.addr = addr;
+		entry.mem.length = len;
+		queue_push(mm_idp, &entry);
+
+		stub_queue_unlock(mm_idp, flags);
 		return 0;
 	}
-
-	sc = syscall_stub_alloc(mm_idp);
-	sc->syscall = STUB_SYSCALL_MUNMAP;
-	sc->mem.addr = addr;
-	sc->mem.length = len;
-
-	return 0;
 }

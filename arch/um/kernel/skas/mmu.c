@@ -4,6 +4,7 @@
  * Copyright (C) 2002 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
  */
 
+#include <linux/atomic.h>
 #include <linux/mm.h>
 #include <linux/sched/signal.h>
 #include <linux/slab.h>
@@ -42,73 +43,234 @@ void exit_turnstile(struct mm_id *mm_id) __releases(turnstile)
 }
 
 /*
- * Hand a task a task slot of its own (docs §12.35).
- *
- * The pool is a bitmap in the mm: a set bit is a slot whose stub thread is
- * parked and free.  Slot 0 is never in it -- it is the mm's control slot (see
- * mm_id.h) -- so a claimed slot is always >= 1, and an mm with no pool (ptrace
- * mode, or a stub built without STUB_SPAWN) always answers 0, which is the
- * single slot it has always had.
- *
- * Finding no free slot is a normal state, not an error: it means every stub
- * thread of this mm is already in guest user mode.  Waiting is bounded by how
- * long a slot holder can stay there, i.e. about one scheduling quantum.  The
- * wait must happen without the turnstile (a holder may need it), which is why
- * callers claim before taking it.
+ * The pending map/unmap batch belongs to the mm now, not to slot 0's stub_data
+ * (see mm_id.h), so it needs a lock of its own.  A spinlock rather than a
+ * mutex: the TLB-flush path that queues unmaps runs with interrupts disabled,
+ * and nothing done under it can block.
  */
+void stub_queue_lock(struct mm_id *mm_id, unsigned long *flags)
+{
+	struct mm_context *ctx = container_of(mm_id, struct mm_context, id);
+
+	spin_lock_irqsave(&ctx->batch_lock, *flags);
+}
+
+void stub_queue_unlock(struct mm_id *mm_id, unsigned long flags)
+{
+	struct mm_context *ctx = container_of(mm_id, struct mm_context, id);
+
+	spin_unlock_irqrestore(&ctx->batch_lock, flags);
+}
+
+/*
+ * The control slot (slot 0) can serve one stub-syscall batch at a time.  This
+ * is a mutex rather than a spinlock because the caller then blocks in the
+ * handoff until the stub has applied the batch.
+ */
+void stub_control_lock(struct mm_id *mm_id)
+{
+	struct mm_context *ctx = container_of(mm_id, struct mm_context, id);
+
+	mutex_lock(&ctx->control_lock);
+}
+
+void stub_control_unlock(struct mm_id *mm_id)
+{
+	struct mm_context *ctx = container_of(mm_id, struct mm_context, id);
+
+	mutex_unlock(&ctx->control_lock);
+}
+
+/*
+ * A stub that never got its pool scheduled is broken for good: the threads are
+ * spawned before the seccomp filter goes in, so there is no second chance to
+ * create them.  The first mm that gives up says so, and every later mm starts
+ * serialised instead of paying the same one second.
+ */
+static bool stub_pool_broken;
+/* How many claims had to wait for their own mm's pool to park (docs §12.35.7.1). */
+static atomic_t stub_blind_claims = ATOMIC_INIT(0);
+
+/*
+ * Has slot @slot's stub thread parked?  Parking is exactly the state the
+ * kernel needs before it writes guest registers into the slot: the stub wrote
+ * its ctl word and let the host write the signal frame the registers live in,
+ * then flipped its futex word to FUTEX_IN_KERN.  Reading both words is cheap
+ * enough to do on every claim, and neither can be torn.
+ */
+static bool stub_slot_parked(struct mm_id *mm_id, int slot)
+{
+	struct stub_data *sd = STUB_DATA_SLOT(mm_id, slot);
+
+	return READ_ONCE(*STUB_SLOT_CTL_AT((unsigned long)sd)) ==
+			STUB_CTL_PARKING &&
+	       STUB_FUTEX_OWNER(READ_ONCE(sd->futex)) == FUTEX_IN_KERN;
+}
+
+/*
+ * Publish the slots whose stub thread has parked.
+ *
+ * A slot cannot be published when the mm is created, because the pool threads
+ * are released by a go word at creation and then have to be scheduled on the
+ * host before they can park.  Nothing orders that against the mm's first guest
+ * entry: the very task that created the mm comes straight back to userspace()
+ * and claims a slot, and if it wins the race the slot's signal frame is still
+ * unwritten -- see the comment on @slot_ok.  So publication is deferred to the
+ * claim path, which is the first place that needs it and by then runs on the
+ * one task of a brand new mm (a second task cannot exist before the first one
+ * has run guest code).
+ *
+ * Lazy is also free: a slot that is in use never looks parked, so the scan is
+ * idempotent and a slot is only ever added once.  Slots are never unpublished:
+ * once its thread has parked, a slot stays parked until the kernel hands it a
+ * guest context, and the kernel puts it back into @slot_free only after the
+ * stub has trapped again, i.e. after it parked again.
+ */
+static void stub_publish_parked(struct mm_id *mm_id)
+{
+	struct mm_context *ctx = container_of(mm_id, struct mm_context, id);
+	int i;
+
+	for (i = 1; i < mm_id->slot_count; i++) {
+		unsigned long bit = 1UL << i;
+
+		if ((mm_id->slot_ok & bit) || !stub_slot_parked(mm_id, i))
+			continue;
+
+		mm_id->slot_ok |= bit;
+		mm_id->slot_free |= bit;
+		ctx->slot_gen++;
+	}
+}
+
+/*
+ * Take a free task slot, if there is one; -1 when there is not.  Caller holds
+ * slot_lock (docs §12.35).
+ *
+ * The pool itself is a bitmap in the mm: a set bit in @slot_free is a slot
+ * whose stub thread is parked, free and known to be usable.  Slot 0 is never
+ * in it -- it is the mm's control slot, see mm_id.h -- so a claimed slot is
+ * always >= 1.  An mm with no pool (ptrace mode, a stub built without
+ * STUB_SPAWN, or stub_slots=1) never reaches this function at all.
+ *
+ * Sticky first: a task that ran guest code before goes back to the same stub
+ * thread whenever it can.  That keeps the guest task on one host thread, and
+ * therefore on one host core, which is not a micro-optimisation -- measured on
+ * this device, a single-threaded guest workload that was spread over the pool
+ * ran 4.3x slower because most of its entries landed on little cores.
+ * Otherwise round-robin, so new tasks spread out.
+ */
+static int stub_slot_take(struct mm_id *mm_id)
+{
+	int hint = current->thread.stub_slot;
+	int slot, i;
+
+	if (hint >= 1 && hint < mm_id->slot_count &&
+	    (mm_id->slot_free & (1UL << hint))) {
+		mm_id->slot_free &= ~(1UL << hint);
+		return hint;
+	}
+
+	slot = mm_id->slot_next < 1 || mm_id->slot_next >= mm_id->slot_count ?
+	       1 : mm_id->slot_next;
+	for (i = 0; i < mm_id->slot_count - 1; i++) {
+		if (slot >= mm_id->slot_count)
+			slot = 1;
+		if (mm_id->slot_free & (1UL << slot)) {
+			mm_id->slot_free &= ~(1UL << slot);
+			mm_id->slot_next = slot + 1 < mm_id->slot_count ?
+					   slot + 1 : 1;
+			current->thread.stub_slot = slot;
+			return slot;
+		}
+		slot++;
+	}
+
+	return -1;
+}
+
 int stub_slot_get(struct mm_id *mm_id)
 {
 	struct mm_context *ctx = container_of(mm_id, struct mm_context, id);
-	unsigned int spins = 0;
-	int i;
+	unsigned long long start = 0;
+	bool noted = false;
 
 	if (mm_id->slot_count <= 1)
 		return 0;
 
 	for (;;) {
-		int hint = current->thread.stub_slot;
+		unsigned int gen;
 		int slot;
 
-		guard(mutex)(&ctx->slot_lock);
+		scoped_guard(mutex, &ctx->slot_lock) {
+			stub_publish_parked(mm_id);
+			slot = stub_slot_take(mm_id);
+			gen = ctx->slot_gen;
+		}
+
+		if (slot >= 0)
+			return slot;
 
 		/*
-		 * Sticky first: a task that ran guest code before goes back to
-		 * the same stub thread whenever it can.  That keeps the guest
-		 * task on one host thread, and therefore on one host core,
-		 * which is not a micro-optimisation -- measured on this
-		 * device, a single-threaded guest workload that was spread
-		 * over the pool ran 4.3x slower because most of its entries
-		 * landed on little cores.
+		 * Nothing free.  Two very different situations, and the
+		 * difference decides how long this may sleep:
+		 *
+		 *  - @slot_ok is empty: this mm's pool is still being
+		 *    scheduled (or its threads never spawned at all).  Nothing
+		 *    has ever run on it, so this task is the only one of the
+		 *    mm that can be waiting; the wait ends when the pool parks
+		 *    and is published, and a pool that never does that after a
+		 *    second is broken -- fall back to the control slot for
+		 *    good.  The first few such claims are printed, with the
+		 *    guest pid rather than the stub's: the point is that a
+		 *    brand new guest process hit its own pool mid-startup
+		 *    (docs §12.35.7.1).
+		 *
+		 *  - Some slots are published but all held: ordinary
+		 *    contention.  Sleep until one comes back.
 		 */
-		if (hint >= 1 && hint < mm_id->slot_count &&
-		    (mm_id->slot_free & (1UL << hint))) {
-			mm_id->slot_free &= ~(1UL << hint);
-			return hint;
-		}
-
-		/* Otherwise the round-robin scan, so new tasks spread out. */
-		slot = mm_id->slot_next < 1 ||
-		       mm_id->slot_next >= mm_id->slot_count ?
-		       1 : mm_id->slot_next;
-		for (i = 0; i < mm_id->slot_count - 1; i++) {
-			if (slot >= mm_id->slot_count)
-				slot = 1;
-			if (mm_id->slot_free & (1UL << slot)) {
-				mm_id->slot_free &= ~(1UL << slot);
-				mm_id->slot_next = slot + 1 < mm_id->slot_count ?
-						   slot + 1 : 1;
-				current->thread.stub_slot = slot;
-				return slot;
+		if (!mm_id->slot_ok) {
+			if (!noted) {
+				noted = true;
+				start = ktime_get_ns();
+				if (atomic_inc_return(&stub_blind_claims) <= 5)
+					pr_info("stub: pid %d claimed a slot while its pool (%d slots) was still parking\n",
+						current->pid, mm_id->slot_count);
+			} else if (ktime_get_ns() - start > NSEC_PER_SEC) {
+				pr_err("stub: mm %d pool never parked, running serialised\n",
+				       mm_id->pid);
+				scoped_guard(mutex, &ctx->slot_lock)
+					mm_id->slot_count = 1;
+				stub_pool_broken = true;
+				return 0;
 			}
-			slot++;
 		}
 
-		if (++spins < 1000)
-			cpu_relax();
-		else {
-			spins = 0;
-			schedule_timeout_interruptible(1);
-		}
+		/*
+		 * Sleep, do not poll.  The generation counter makes the wait
+		 * race-free: a slot returned (or published) after the take
+		 * above bumped slot_gen, so the condition is already true and
+		 * this does not sleep at all; if it becomes true after the task
+		 * is on the queue, wake_up_all() finds it.
+		 *
+		 * A timeout as well, so the broken-pool deadline above is
+		 * checked even if nothing ever wakes this task.
+		 *
+		 * Uninterruptible (_timeout, not _interruptible_timeout).  UML
+		 * runs its timers off host signals, so an interruptible sleep
+		 * here returns -EINTR almost immediately, over and over: the
+		 * "sleep" becomes a busy loop in kernel space that never
+		 * schedules.  Measured in the app domain, booting systemd with
+		 * stub_slots=8: one guest task sat in this loop for 21 s of
+		 * jiffies and tripped an "rcu_sched detected expedited stalls"
+		 * dump, and in the lab it is the same defect that showed up as
+		 * 30x the CPU for a mismatched pool size (docs §12.35.7.2).
+		 * Nothing but the timeout wants to interrupt this wait, and
+		 * the timeout is ours.
+		 */
+		wait_event_timeout(ctx->slot_wait,
+				   READ_ONCE(ctx->slot_gen) != gen,
+				   HZ / 10);
 	}
 }
 
@@ -119,23 +281,24 @@ void stub_slot_put(struct mm_id *mm_id, int slot)
 	if (slot < 1 || slot >= mm_id->slot_count)
 		return;
 
-	scoped_guard(mutex, &ctx->slot_lock)
+	scoped_guard(mutex, &ctx->slot_lock) {
 		mm_id->slot_free |= 1UL << slot;
+		ctx->slot_gen++;
+	}
+
+	wake_up_all(&ctx->slot_wait);
 }
 
 static bool slot_report_done;
-/* How many task slots the stub actually has; settled by the first mm. */
-static int stub_pool_slots = 1;
 /*
- * Upper bound on the pool, from the command line.  The stub always spawns
- * STUB_MAX_SLOTS threads (it cannot know this at the time -- it spawns before
- * the filter goes in, and the cap is a kernel-side choice), but the kernel
- * does not have to *use* them all.  stub_slots=1 keeps the old single-slot
- * behaviour on the same kernel, which is what makes an A/B on one boot image
- * possible; the number also decides how many tasks of an mm may be in guest
- * user mode at once.
+ * Pool size, from the command line.  The stub spawns the threads it is told to
+ * spawn (stub_init_data::spawn_slots) because clone is only callable before the
+ * seccomp filter goes in, so the kernel has to decide before the stub starts;
+ * stub_slots=1 spawns none and keeps the old single-slot behaviour on the same
+ * kernel, which is what makes an A/B on one boot image possible.  The number is
+ * also how many tasks of one mm may be in guest user mode at once.
  */
-static int stub_slots_max = STUB_MAX_SLOTS;
+static int stub_slots_max = 1;
 
 static int __init uml_stub_slots_setup(char *line, int *add)
 {
@@ -151,14 +314,28 @@ static int __init uml_stub_slots_setup(char *line, int *add)
 	return 0;
 }
 
+/*
+ * The pool size the stub should build.  Used by start_userspace() to tell the
+ * stub how many threads to spawn, so that an mm never carries threads the
+ * kernel will not hand work to.
+ */
+int stub_slots_in_use(void)
+{
+	return stub_slots_max;
+}
+
 __uml_setup("stub_slots=", uml_stub_slots_setup,
 "stub_slots=<n>\n"
-"    How many task slots of an mm may hold guest user mode at once\n"
-"    (docs §12.35). Each slot is one thread of the mm's stub process, so\n"
-"    n-1 concurrent guest threads can run; the stub spawns all 8 threads\n"
-"    regardless, this only caps how many the kernel hands work to. 1 keeps\n"
-"    the single-stub behaviour, including its serialisation.\n"
-"    Default: 8 (STUB_MAX_SLOTS).\n\n");
+"    How many task slots an mm's stub process carries, and therefore how\n"
+"    many of its tasks may be in guest user mode at once (docs §12.35).\n"
+"    The extra n-1 stub threads are spawned before the seccomp filter is\n"
+"    installed -- clone is not available afterwards -- so they are eager:\n"
+"    every guest process pays n-1 parked host threads, not just threaded\n"
+"    ones. 1 is the classic single stub thread, including its serialisation.\n"
+"\n"
+"    Default: 1.  With n>1, threadscale measures 3.1-3.4x against 1.0x for\n"
+"    the same four-thread workload (docs §12.35.7), and a single-threaded\n"
+"    guest is held to one host core by task->slot affinity.\n\n");
 
 int init_new_context(struct task_struct *task, struct mm_struct *mm)
 {
@@ -168,6 +345,10 @@ int init_new_context(struct task_struct *task, struct mm_struct *mm)
 
 	mutex_init(&mm->context.turnstile);
 	mutex_init(&mm->context.slot_lock);
+	init_waitqueue_head(&mm->context.slot_wait);
+	mm->context.slot_gen = 0;
+	spin_lock_init(&mm->context.batch_lock);
+	mutex_init(&mm->context.control_lock);
 	spin_lock_init(&mm->context.sync_tlb_lock);
 
 	/*
@@ -210,9 +391,10 @@ int init_new_context(struct task_struct *task, struct mm_struct *mm)
 	 *
 	 * Never leave one unreleased: a released slot parks, an unreleased one
 	 * spins for as long as the mm lives, and the guest would pay for it as
-	 * stolen host CPUs.
+	 * stolen host CPUs.  Only the slots this mm was told to spawn are
+	 * released; with the pool off there are no threads to release.
 	 */
-	for (i = 1; i < STUB_MAX_SLOTS; i++) {
+	for (i = 1; i < stub_slots_max; i++) {
 		struct stub_data *sd = STUB_DATA_SLOT(new_id, i);
 
 		WRITE_ONCE(*STUB_SLOT_GO_AT((unsigned long)sd), 1u);
@@ -220,43 +402,63 @@ int init_new_context(struct task_struct *task, struct mm_struct *mm)
 	smp_wmb();
 
 	/*
-	 * Best-effort census, for the one line below and for a person reading
-	 * a boot log.  The pool is an optimisation, so nothing here blocks the
-	 * mm: a thread that is slow to be scheduled is counted next time.
+	 * Slot 0 is the exec'd stub thread and start_userspace() has already
+	 * waited for it to trap, so it is usable immediately.  Slot 0 stays out
+	 * of the pool: it is the control slot (see mm_id.h), so a claimable slot
+	 * is always >= 1.
 	 */
-	new_id->slots_ready = 1;	/* slot 0 is the exec'd stub thread */
-	if (!slot_report_done) {
+	new_id->slot_count = stub_pool_broken ? 1 : stub_slots_max;
+	new_id->slot_next = 1;
+	new_id->slot_free = 0;
+	new_id->slot_ok = 0;
+
+#ifdef STUB_SLOT_BLIND
+	/*
+	 * Diagnostic build only, never ship this (docs §12.35.7.1): publish every
+	 * slot up front, which is the behaviour that made guests die with
+	 * "failed to set regs: -22" a few times per boot.  It exists so the
+	 * failure path can print what an unparked slot actually looks like when
+	 * it is handed out, instead of the mechanism being argued from code.
+	 */
+	for (i = 1; i < new_id->slot_count; i++) {
+		new_id->slot_ok |= 1UL << i;
+		new_id->slot_free |= 1UL << i;
+	}
+#endif
+
+	/*
+	 * Best-effort census, for the one line below and for a person reading
+	 * a boot log, and -- more than that -- the one chance to publish the
+	 * pool without a claim path paying for it.  If the threads park inside
+	 * this 20 ms window the mm starts with a full pool; if they do not,
+	 * stub_publish_parked() picks them up on the first claim instead.  A
+	 * thread that is slow to be scheduled is not a reason to serialise the
+	 * mm, which is why this waits one boot only.
+	 */
+	if (!slot_report_done && new_id->slot_count > 1) {
 		unsigned long long deadline = ktime_get_ns() +
 					       20ull * NSEC_PER_MSEC;
+		int ready;
 
+		/* slot 0 is the exec'd stub thread and start_userspace()
+		 * has already waited for it. */
 		do {
-			new_id->slots_ready = 1;
-			for (i = 1; i < STUB_MAX_SLOTS; i++) {
-				struct stub_data *sd = STUB_DATA_SLOT(new_id, i);
-
-				if (READ_ONCE(*STUB_SLOT_CTL_AT((unsigned long)sd)) ==
-						STUB_CTL_PARKING &&
-				    STUB_FUTEX_OWNER(READ_ONCE(sd->futex)) ==
-						FUTEX_IN_KERN)
-					new_id->slots_ready++;
-			}
-			if (new_id->slots_ready == STUB_MAX_SLOTS)
+			ready = 1;
+			for (i = 1; i < new_id->slot_count; i++)
+				if (stub_slot_parked(new_id, i))
+					ready++;
+			if (ready == new_id->slot_count)
 				break;
 			cpu_relax();
 		} while (ktime_get_ns() < deadline);
 
 		slot_report_done = true;
-		/*
-		 * The pool size is a property of the stub, so the first mm's
-		 * census settles it for every later mm too: they all run the
-		 * same stub binary on the same kernel. Counting per mm would
-		 * cost a 20 ms wait on every process creation.
-		 */
-		stub_pool_slots = min_t(int, new_id->slots_ready, stub_slots_max);
+		stub_publish_parked(new_id);
+
 		printk(KERN_INFO "stub: %d of %d task slots parked for the first mm\n",
-		       new_id->slots_ready, STUB_MAX_SLOTS);
-		if (new_id->slots_ready != STUB_MAX_SLOTS) {
-			for (i = 1; i < STUB_MAX_SLOTS; i++) {
+		       ready, new_id->slot_count);
+		if (ready != new_id->slot_count) {
+			for (i = 1; i < new_id->slot_count; i++) {
 				struct stub_data *sd = STUB_DATA_SLOT(new_id, i);
 
 				printk(KERN_INFO "stub: slot %d ctl=%u futex=0x%x\n",
@@ -266,14 +468,6 @@ int init_new_context(struct task_struct *task, struct mm_struct *mm)
 			}
 		}
 	}
-
-	/*
-	 * Publish the pool.  Slot 0 stays out of it: it is the control slot
-	 * (see mm_id.h), so a claimable slot is always >= 1.
-	 */
-	new_id->slot_count = stub_pool_slots < 1 ? 1 : stub_pool_slots;
-	new_id->slot_next = 1;
-	new_id->slot_free = (((1UL << new_id->slot_count) - 1) & ~1UL);
 
 	/* Ensure the new MM is clean and nothing unwanted is mapped */
 	unmap(new_id, 0, STUB_START);

@@ -90,28 +90,17 @@ struct stub_init_data {
 
 	unsigned long signal_handler;
 	unsigned long signal_restorer;
+
+	/*
+	 * How many stub threads to spawn (docs §12.35).  The kernel decides:
+	 * the pool is opt-in (stub_slots=), and a stub that spawned threads its
+	 * mm will never hand work to would be paying host threads for nothing.
+	 */
+	int spawn_slots;
 };
 
 #define STUB_NEXT_SYSCALL(s) \
 	((struct stub_syscall *) (((unsigned long) s) + (s)->cmd_len))
-
-enum stub_syscall_type {
-	STUB_SYSCALL_UNSET = 0,
-	STUB_SYSCALL_MMAP,
-	STUB_SYSCALL_MUNMAP,
-};
-
-struct stub_syscall {
-	struct {
-		unsigned long addr;
-		unsigned long length;
-		unsigned long offset;
-		int fd;
-		int prot;
-	} mem;
-
-	enum stub_syscall_type syscall;
-};
 
 struct stub_data {
 	long err;

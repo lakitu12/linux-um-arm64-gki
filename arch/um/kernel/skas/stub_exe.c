@@ -100,13 +100,13 @@ noinline static void stub_thread_setup(struct stub_data *d)
  * refused, or it died), the boot pays one timeout and carries on with the
  * slots it got.
  */
-noinline static void wait_stub_threads_ready(unsigned long slot_base)
+noinline static void wait_stub_threads_ready(unsigned long slot_base, int slots)
 {
 	unsigned long start = stub_cycles();
 	unsigned long budget = 20000UL * stub_cycles_per_us();	/* 20 ms */
 	int i;
 
-	for (i = 1; i < STUB_MAX_SLOTS; i++) {
+	for (i = 1; i < slots; i++) {
 		struct stub_data *d = (void *)(slot_base +
 					       (unsigned long)i * STUB_SLOT_SIZE);
 		volatile unsigned int *ctl = STUB_SLOT_CTL_AT((unsigned long)d);
@@ -119,11 +119,11 @@ noinline static void wait_stub_threads_ready(unsigned long slot_base)
 	}
 }
 
-noinline static void spawn_stub_threads(unsigned long slot_base)
+noinline static void spawn_stub_threads(unsigned long slot_base, int slots)
 {
 	int i;
 
-	for (i = 1; i < STUB_MAX_SLOTS; i++) {
+	for (i = 1; i < slots; i++) {
 		unsigned long base = slot_base + (unsigned long)i * STUB_SLOT_SIZE;
 		unsigned long stack_top = base + STUB_SLOT_SIZE - 16;
 		long res;
@@ -290,17 +290,26 @@ noinline static void real_init(void)
 	/*
 	 * Spawn the rest of the stub thread pool now: clone is only callable
 	 * while no filter is installed, and the threads must exist before
-	 * TSYNC so the filter covers them in one go.
+	 * TSYNC so the filter covers them in one go.  How many is the kernel's
+	 * decision (stub_slots=): with the pool off there is nothing to spawn
+	 * and the mm keeps the single stub thread it always had.
 	 */
 #ifndef STUB_SPAWN
 #define STUB_SPAWN 0
 #endif
-	if (init_data.seccomp && STUB_SPAWN) {
+	if (init_data.seccomp && STUB_SPAWN && init_data.spawn_slots > 1) {
 		unsigned long slots = init_data.stub_start + STUB_DATA_OFFSET;
 
-		spawn_stub_threads(slots);
+		/*
+		 * Exactly the count the kernel asked for, no more: the kernel
+		 * releases one go word per slot it knows about, so a thread
+		 * spawned past that would sit spinning on a go word nobody
+		 * writes for the life of the mm -- a stolen host core per
+		 * thread, which is exactly what this pool must never cost.
+		 */
+		spawn_stub_threads(slots, init_data.spawn_slots);
 		/* Their setup syscalls must run before the filter exists. */
-		wait_stub_threads_ready(slots);
+		wait_stub_threads_ready(slots, init_data.spawn_slots);
 	}
 
 	/*

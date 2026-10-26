@@ -66,6 +66,20 @@
  */
 #define STUB_MAX_SLOTS 8
 /*
+ * Capacity of the mm's pending map/unmap batch, in entries.  It used to be
+ * implied by the stub_data page (a slot had to hold the whole queue); it is a
+ * separate number now because the queue lives in the kernel's mm_id, where
+ * several tasks of one process can append to it at the same time.
+ *
+ * 80 is what a 4 KiB stub_data page held once the fields around the array are
+ * subtracted ((4096 - 256) / 48), i.e. the old window on the smallest page
+ * size in use, and it therefore fits every slot's array.  A 16 KiB build gets
+ * four times the room in the stub but ships at most this many per handoff;
+ * that is a prefault-window knob, not a correctness one.
+ */
+#define STUB_QUEUE_MAX 80
+
+/*
  * Where the stub's per-slot descriptor-passing sockets live in its own
  * descriptor table.  High on purpose: the stub's close_range() sweep keeps
  * [STUB_SOCK_BASE, STUB_SOCK_BASE + STUB_MAX_SLOTS) and closes everything

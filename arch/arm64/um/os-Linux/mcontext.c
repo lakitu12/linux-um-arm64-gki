@@ -204,10 +204,25 @@ int set_stub_state(struct uml_pt_regs *regs, struct stub_data *data,
 	 * EL0, so all that is needed is to tell the stub the value and let it
 	 * install it with a single "msr" on resume.
 	 */
-	if (data->arch_data.tls != regs->gp[HOST_TLS]) {
-		data->arch_data.tls = regs->gp[HOST_TLS];
-		data->arch_data.sync |= STUB_SYNC_TLS;
-	}
+	/*
+	 * Always reinstall it, even when the value is unchanged.
+	 *
+	 * The value this compares against is what the stub last *reported*, and
+	 * the register itself is per host thread -- so the two agree only while
+	 * a task keeps coming back to the same slot.  With a task-slot pool a
+	 * task can be handed a different slot (docs §12.35), and then "the slot
+	 * already knows this TLS" is true while the thread that owns the slot
+	 * still has the previous owner's TPIDR_EL0 in the register: the compare
+	 * passes, no restore happens, and the guest runs with someone else's
+	 * thread pointer.  Measured symptom: intermittent SIGSEGV in threaded
+	 * guests, and a 10x slowdown once more than one slot could be live.
+	 *
+	 * On arm64 the unconditional form costs one "msr" and no host syscall,
+	 * which is why it is done here rather than as a per-handoff policy:
+	 * x86's equivalent is arch_prctl() and keeps the compare.
+	 */
+	data->arch_data.tls = regs->gp[HOST_TLS];
+	data->arch_data.sync |= STUB_SYNC_TLS;
 
 	return 0;
 }

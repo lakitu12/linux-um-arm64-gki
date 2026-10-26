@@ -193,11 +193,11 @@ void wait_stub_done_seccomp(struct mm_id *mm_idp, int slot, int running,
 			 * is non-zero, so a batch with no descriptors never
 			 * touches the socket at all.
 			 */
-			data->syscall_fd_num = mm_idp->syscall_fd_num;
+			data->syscall_fd_num = mm_idp->slot_fd_num[slot];
 
-			if (mm_idp->syscall_fd_num) {
+			if (mm_idp->slot_fd_num[slot]) {
 				unsigned int fds_size =
-					sizeof(int) * mm_idp->syscall_fd_num;
+					sizeof(int) * mm_idp->slot_fd_num[slot];
 				struct cmsghdr *cmsg;
 
 				msgh.msg_control = ctrl.data;
@@ -206,7 +206,7 @@ void wait_stub_done_seccomp(struct mm_id *mm_idp, int slot, int running,
 				cmsg->cmsg_level = SOL_SOCKET;
 				cmsg->cmsg_type = SCM_RIGHTS;
 				cmsg->cmsg_len = CMSG_LEN(fds_size);
-				memcpy(CMSG_DATA(cmsg), mm_idp->syscall_fd_map,
+				memcpy(CMSG_DATA(cmsg), mm_idp->slot_fd_map[slot],
 				       fds_size);
 
 				CATCH_EINTR(syscall(__NR_sendmsg,
@@ -396,6 +396,7 @@ static int userspace_tramp(void *data)
 	struct stub_init_data init_data = {
 		.seccomp = using_seccomp,
 		.stub_start = STUB_START,
+		.spawn_slots = stub_slots_in_use(),
 	};
 	struct iomem_region *iomem;
 	int ret, i;
@@ -828,47 +829,39 @@ static int at_syscall_insn(int pid, unsigned long pc)
  * Move the mm's pending map/unmap batch into the slot that is about to run
  * guest code.
  *
- * The batch is built by the fault path in the control slot (slot 0) and, in
- * seccomp mode, shipped to the guest in the same handoff that resumes it, so
- * applying it costs nothing extra.  A handoff on any other slot has to carry
- * the same bytes, because the stub thread that wakes is the one that has to
- * make those mmap/munmap calls before the guest can run.
+ * The batch is built by the fault path in the mm and, in seccomp mode, shipped
+ * to the guest in the same handoff that resumes it, so applying it costs
+ * nothing extra.  A handoff on any slot has to carry the same bytes, because
+ * the stub thread that wakes is the one that has to make those mmap/munmap
+ * calls before the guest can run.
+ *
+ * The descriptor list travels the same way: the kernel sends it on the slot's
+ * own socket, so the list this slot will use has to be the one copied here.
  */
-static void ship_stub_batch(struct mm_id *mm_id, struct stub_data *d, int slot)
+static void ship_stub_batch(struct mm_id *mm_idp, struct stub_data *d, int slot)
 {
-	struct stub_data *ctl = STUB_DATA_SLOT(mm_id, 0);
-	int len = mm_id->syscall_data_len;
+	unsigned long flags;
+	int len;
 
-	if (slot == 0 || !len) {
-		d->syscall_data_len = len;
-		return;
+	stub_queue_lock(mm_idp, &flags);
+
+	len = mm_idp->syscall_data_len;
+	d->syscall_data_len = len;
+	if (len > 0) {
+		memcpy(d->syscall_data, mm_idp->queue,
+		       len * sizeof(mm_idp->queue[0]));
+		mm_idp->syscall_data_len = 0;
 	}
 
-	if (len > 0)
-		memcpy(d->syscall_data, ctl->syscall_data,
-		       len * sizeof(d->syscall_data[0]));
+	mm_idp->slot_fd_num[slot] = mm_idp->syscall_fd_num;
+	if (mm_idp->syscall_fd_num)
+		memcpy(mm_idp->slot_fd_map[slot], mm_idp->syscall_fd_map,
+		       sizeof(mm_idp->syscall_fd_map));
+	mm_idp->syscall_fd_num = 0;
+
 	d->err = 0;
-	d->syscall_data_len = len;
-	ctl->syscall_data_len = 0;
-}
 
-/* Put an error report where syscall_stub_dump_error() will find it. */
-static void unship_stub_batch(struct mm_id *mm_id, struct stub_data *d, int slot)
-{
-	struct stub_data *ctl = STUB_DATA_SLOT(mm_id, 0);
-	int len = d->syscall_data_len;
-
-	if (slot == 0)
-		return;
-
-	if (len > 0)
-		memcpy(ctl->syscall_data, d->syscall_data,
-		       len * sizeof(d->syscall_data[0]));
-	else
-		len = mm_id->syscall_data_len;
-	ctl->err = d->err;
-	ctl->syscall_data_len = len;
-	mm_id->syscall_data_len = len;
+	stub_queue_unlock(mm_idp, flags);
 }
 
 void userspace(struct uml_pt_regs *regs)
@@ -877,6 +870,7 @@ void userspace(struct uml_pt_regs *regs)
 	siginfo_t si_local;
 	siginfo_t *si;
 	int sig, slot;
+	bool serialised;
 
 	/* Handle any immediate reschedules or signals */
 	interrupt_end();
@@ -890,13 +884,21 @@ void userspace(struct uml_pt_regs *regs)
 		 * that hold the slots to give them back, and they cannot run.
 		 */
 		slot = stub_slot_get(mm_id);
+		serialised = !using_seccomp || mm_id->slot_count <= 1;
 
 		/*
-		 * At any given time, only one CPU thread can enter the
-		 * turnstile to operate on the same stub process, including
-		 * executing stub system calls (mmap and munmap).
+		 * The turnstile used to be held across the whole user-mode
+		 * entry, which is what made "one task of an mm at a time" a
+		 * guarantee rather than an accident.  With a task-slot pool it
+		 * is only needed where two tasks would otherwise share slot 0:
+		 * the ptrace path, an mm without a pool, and the queue/stub
+		 * syscall paths (which take it themselves).
 		 */
-		enter_turnstile(mm_id);
+		if (serialised) {
+			enter_turnstile(mm_id);
+			/* See turnstile_owner: a flush must not re-take it. */
+			mm_id->turnstile_owner = gettid();
+		}
 
 		/*
 		 * When we are in time-travel mode, userspace can theoretically
@@ -930,8 +932,18 @@ void userspace(struct uml_pt_regs *regs)
 
 			err = set_stub_state(regs, proc_data, singlestepping());
 			if (err) {
-				printk(UM_KERN_ERR "%s - failed to set regs: %d",
-				       __func__, err);
+				/*
+				 * The slot was supposed to have parked before it
+				 * was published (docs §12.35.7.1).  If this ever
+				 * fires, the slot's own words say why: ctl tells
+				 * whether its thread got as far as the parking
+				 * handshake, futex whether it handed over, and
+				 * mctx_offset whether it ever wrote a frame.
+				 */
+				printk(UM_KERN_ERR "%s - failed to set regs: %d (stub %d slot %d ctl %u futex 0x%x mctx %u)\n",
+				       __func__, err, mm_id->pid, slot,
+				       *STUB_SLOT_CTL_AT((unsigned long)proc_data),
+				       proc_data->futex, proc_data->mctx_offset);
 				fatal_sigsegv();
 			}
 
@@ -939,7 +951,14 @@ void userspace(struct uml_pt_regs *regs)
 			if (proc_data->restart_wait != 0)
 				panic("Programming error: Flag to only run syscalls in child was not cleared!");
 
-			/* Mark pending syscalls for flushing */
+			/*
+			 * Mark pending syscalls for flushing.  Everything up
+			 * to here touches state this task owns (the slot) or
+			 * that is protected by the batch lock, so the handoff
+			 * itself needs no mm-wide lock: another task of the
+			 * same mm may be in guest user mode on its own slot
+			 * at the same time, which is the whole point.
+			 */
 			ship_stub_batch(mm_id, proc_data, slot);
 
 			wait_stub_done_seccomp(mm_id, slot, 0, 0);
@@ -947,17 +966,34 @@ void userspace(struct uml_pt_regs *regs)
 			sig = proc_data->signal;
 
 			if (sig == SIGTRAP && proc_data->err != 0) {
+				unsigned long flags;
+
 				printk(UM_KERN_ERR "%s - Error flushing stub syscalls",
 				       __func__);
-				unship_stub_batch(mm_id, proc_data, slot);
+				/*
+				 * Put the failed batch back where the error
+				 * reporter looks for it, then stop: a stub that
+				 * cannot map a page cannot be trusted with the
+				 * guest's memory afterwards.
+				 */
+				stub_queue_lock(mm_id, &flags);
+				if (proc_data->syscall_data_len > 0)
+					memcpy(mm_id->queue, proc_data->syscall_data,
+					       proc_data->syscall_data_len *
+					       sizeof(mm_id->queue[0]));
+				mm_id->syscall_data_len = proc_data->syscall_data_len;
+				stub_queue_unlock(mm_id, flags);
 				syscall_stub_dump_error(mm_id);
-				mm_id->syscall_data_len = proc_data->err;
 				fatal_sigsegv();
 			}
 
-			mm_id->syscall_data_len = 0;
-			mm_id->syscall_fd_num = 0;
-
+			/*
+			 * The batch was consumed before the guest resumed (the
+			 * handoff only returns once the stub has trapped again),
+			 * so nothing is pending here; the queue itself is
+			 * protected by the batch lock and by then holds only
+			 * what the fault path queued after the resume.
+			 */
 			err = get_stub_state(regs, proc_data, NULL);
 			if (err) {
 				printk(UM_KERN_ERR "%s - failed to get regs: %d",
@@ -1209,13 +1245,16 @@ void userspace(struct uml_pt_regs *regs)
 			}
 		}
 
-		exit_turnstile(mm_id);
+		if (serialised) {
+			mm_id->turnstile_owner = 0;
+			exit_turnstile(mm_id);
+		}
 		/*
 		 * The handoff is over and everything this task needs from the
 		 * slot has been copied out of it (registers, siginfo), so the
 		 * slot can go back to the pool before the trap is handled.
 		 * Handling it is what queues the next batch of mappings, and
-		 * that goes to the control slot, not to this one.
+		 * that goes to the mm's queue, not to this one.
 		 */
 		stub_slot_put(mm_id, slot);
 
