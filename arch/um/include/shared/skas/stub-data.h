@@ -207,6 +207,16 @@ struct stub_data {
 	((volatile unsigned int *)((base) + STUB_DATA_PAGES * UM_KERN_PAGE_SIZE))
 #define STUB_SLOT_CTL_AT(base)	(STUB_SLOT_WORDS_AT(base))
 #define STUB_SLOT_GO_AT(base)	(STUB_SLOT_WORDS_AT(base) + 1)
+/*
+ * TEMPORARY diagnostic (B2PROBE): words [2..5] record why a stub thread took
+ * its own exit_group() path -- errno, which site, its socket and how many
+ * descriptors it had been promised.  The kernel prints them when the stub dies
+ * as SIGSYS.  Remove with the probe in stub.c/mmu.c/process.c.
+ */
+#define STUB_SLOT_PROBE_AT(base)	(STUB_SLOT_WORDS_AT(base) + 2)
+#define STUB_PROBE_RECV			0x52454356u	/* "RECV" */
+#define STUB_PROBE_FUTEX		0x46555458u	/* "FUTX" */
+#define STUB_PROBE_WORDS		4
 #define STUB_CTL_IDLE		0
 #define STUB_CTL_PARKING	1
 #define STUB_CTL_SETUP		2

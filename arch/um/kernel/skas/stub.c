@@ -172,8 +172,17 @@ restart_wait:
 			 */
 			res = stub_syscall4(__NR_futex, (unsigned long)&d->futex,
 					    FUTEX_WAIT, futex_val, 0);
-			if (res < 0 && res != -EINTR && res != -EAGAIN)
+			if (res < 0 && res != -EINTR && res != -EAGAIN) {
+#ifdef STUB_POOL_PROBE
+				volatile unsigned int *pr =
+					STUB_SLOT_PROBE_AT((unsigned long)d);
+				pr[0] = (unsigned int)res;
+				pr[1] = STUB_PROBE_FUTEX;
+				pr[2] = (unsigned int)d->sock_fd;
+				pr[3] = (unsigned int)d->syscall_fd_num;
+#endif
 				stub_syscall1(__NR_exit_group, 1);
+			}
 
 			futex_val = stub_futex_load_acquire(&d->futex);
 		}
@@ -199,8 +208,17 @@ restart_wait:
 			} while (res == -EINTR);
 
 			/* We should never have a receive error (other than -EAGAIN) */
-			if (res < 0 && res != -EAGAIN)
+			if (res < 0 && res != -EAGAIN) {
+#ifdef STUB_POOL_PROBE
+				volatile unsigned int *pr =
+					STUB_SLOT_PROBE_AT((unsigned long)d);
+				pr[0] = (unsigned int)res;
+				pr[1] = STUB_PROBE_RECV;
+				pr[2] = (unsigned int)d->sock_fd;
+				pr[3] = (unsigned int)d->syscall_fd_num;
+#endif
 				stub_syscall1(__NR_exit_group, 1);
+			}
 
 			/* Receive the FDs */
 			fd_msg = msghdr.msg_control;

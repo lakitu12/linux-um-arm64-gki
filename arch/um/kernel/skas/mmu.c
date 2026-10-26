@@ -628,6 +628,35 @@ static irqreturn_t mm_sigchld_irq(int irq, void* dev)
 					printk(KERN_ERR "stub %d exited with %d\n",
 					       pid, (status >> 8) & 0xff);
 
+#ifdef STUB_POOL_PROBE
+				/*
+				 * Diagnostic build only: whichever slot took a
+				 * self-kill path says why in its probe words
+				 * (stub.c, stub-data.h).
+				 */
+				{
+					int i;
+
+					for (i = 0; i < mm_context->id.slot_count; i++) {
+						struct stub_data *sd =
+							STUB_DATA_SLOT(&mm_context->id, i);
+						volatile unsigned int *pr =
+							STUB_SLOT_PROBE_AT((unsigned long)sd);
+
+						if (!pr[1])
+							continue;
+						printk(KERN_ERR
+						       "stub: dead slot %d (%s) errno %d sock_fd %d promised %u ctl %u futex 0x%x\n",
+						       i,
+						       pr[1] == STUB_PROBE_RECV ? "recvmsg" :
+						       pr[1] == STUB_PROBE_FUTEX ? "futex" : "?",
+						       (int)pr[0], (int)pr[2], pr[3],
+						       READ_ONCE(*STUB_SLOT_CTL_AT((unsigned long)sd)),
+						       READ_ONCE(sd->futex));
+					}
+				}
+#endif
+
 				/* Marks the MM as dead */
 				mm_context->id.pid = -1;
 

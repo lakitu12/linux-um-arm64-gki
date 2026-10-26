@@ -209,8 +209,23 @@ void wait_stub_done_seccomp(struct mm_id *mm_idp, int slot, int running,
 				memcpy(CMSG_DATA(cmsg), mm_idp->slot_fd_map[slot],
 				       fds_size);
 
+#ifdef STUB_POOL_PROBE
+				{
+					long sres;
+
+					do {
+						sres = syscall(__NR_sendmsg,
+							       mm_idp->sock[slot], &msgh, 0);
+					} while (sres == -EINTR);
+					if (sres < 0)
+						printk(UM_KERN_ERR
+						       "stub: sendmsg slot %d fds %d failed: %ld\n",
+						       slot, mm_idp->slot_fd_num[slot], sres);
+				}
+#else
 				CATCH_EINTR(syscall(__NR_sendmsg,
 						mm_idp->sock[slot], &msgh, 0));
+#endif
 			}
 
 			data->signal = 0;
