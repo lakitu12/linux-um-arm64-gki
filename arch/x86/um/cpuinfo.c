@@ -15,9 +15,18 @@
 #include <asm/processor.h>
 #include <arch.h>
 
-void arch_show_cpuinfo(struct seq_file *m)
+void arch_show_cpuinfo_ident(struct seq_file *m)
+{
+	seq_printf(m, "vendor_id\t: User Mode Linux\n");
+	seq_printf(m, "model name\t: UML\n");
+}
+
+void arch_show_cpuinfo(struct seq_file *m, int cpu)
 {
 	int i;
+
+	/* x86 needs no per-CPU context: CPUID is per host, not per vCPU. */
+	(void)cpu;
 
 	seq_printf(m, "fpu\t\t: %s\n",
 		   str_yes_no(cpu_has(&boot_cpu_data, X86_FEATURE_FPU)));

@@ -15,7 +15,8 @@ struct seq_file;
  * of the *host's* /proc/cpuinfo during boot; arch_show_cpuinfo() emits the
  * architecture-specific portion of the guest's.
  */
-extern void arch_show_cpuinfo(struct seq_file *m);
+extern void arch_show_cpuinfo_ident(struct seq_file *m);
+extern void arch_show_cpuinfo(struct seq_file *m, int cpu);
 extern int arch_parse_host_cpu_flags(char *line);
 
 extern void arch_check_bugs(void);

@@ -78,8 +78,7 @@ static int show_cpuinfo(struct seq_file *m, void *v)
 #endif
 
 	seq_printf(m, "processor\t: %d\n", i);
-	seq_printf(m, "vendor_id\t: User Mode Linux\n");
-	seq_printf(m, "model name\t: UML\n");
+	arch_show_cpuinfo_ident(m);
 	seq_printf(m, "mode\t\t: skas\n");
 	seq_printf(m, "host\t\t: %s\n", host_info);
 	/*
@@ -89,7 +88,7 @@ static int show_cpuinfo(struct seq_file *m, void *v)
 	 * "Features" list -- both matching what that architecture's real
 	 * /proc/cpuinfo looks like, which is what guest userspace parses.
 	 */
-	arch_show_cpuinfo(m);
+	arch_show_cpuinfo(m, i);
 	seq_printf(m, "cache_alignment\t: %d\n", boot_cpu_data.cache_alignment);
 	seq_printf(m, "bogomips\t: %lu.%02lu\n",
 		   loops_per_jiffy/(500000/HZ),
