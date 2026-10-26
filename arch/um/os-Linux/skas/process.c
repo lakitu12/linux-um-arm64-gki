@@ -438,21 +438,6 @@ static int userspace_tramp(void *data)
 			fcntl(iomem->fd, F_SETFD, 0);
 	}
 
-	/* dup2 signaling FD/socket to STDIN */
-	if (dup2(tramp_data->sockpair[0][0], 0) < 0)
-		exit(3);
-	close(tramp_data->sockpair[0][0]);
-
-	/*
-	 * Place the other slots' sockets at STUB_SOCK_BASE + slot and let them
-	 * survive the exec.  The stub keeps exactly that range open (see
-	 * real_init's close_range sweep) and every slot finds its socket by
-	 * number, so nothing has to be discovered at run time.
-	 *
-	 * Slot 0's socket is fd 0, where the dup2 above put it, so its
-	 * STUB_SOCK_BASE entry is left unused -- the sweep and the numbering
-	 * stay uniform, which matters more than one wasted descriptor.
-	 */
 	if (init_data.stub_data_fd >= STUB_SOCK_BASE &&
 	    init_data.stub_data_fd < STUB_SOCK_BASE + STUB_MAX_SLOTS) {
 		/*
@@ -470,11 +455,71 @@ static int userspace_tramp(void *data)
 		init_data.stub_data_fd = moved;
 	}
 
-	for (i = 1; i < STUB_MAX_SLOTS; i++) {
-		if (dup2(tramp_data->sockpair[i][0], STUB_SOCK_BASE + i) < 0)
-			exit(6);
-		close(tramp_data->sockpair[i][0]);
-		fcntl(STUB_SOCK_BASE + i, F_SETFD, 0);
+	/*
+	 * Move every socket end out of the way before installing any of them.
+	 *
+	 * socketpair() hands out the lowest free descriptors, and this process
+	 * starts with every descriptor the kernel process had -- which, after a
+	 * few guest processes, is a table with hundreds of entries and holes
+	 * scattered through them.  So a pair can land exactly on the number it
+	 * is later installed at (dup2(x, x) is a no-op, and the close() that
+	 * follows then deletes the descriptor the stub is going to recvmsg()
+	 * on: EBADF in the handler, which self-kills the stub, which the kernel
+	 * reports as "Unexpectedly lost MM child"), or an earlier slot's dup2
+	 * can land on a later pair's source and leave two slots sharing one
+	 * socket -- silently, because both are valid sockets.
+	 *
+	 * Relocating all of them above the reserved range first makes both
+	 * impossible.  This runs in the exec'ed child, so the kernel process's
+	 * own copies (which it closes after the vfork) are untouched.
+	 */
+	{
+		int child[STUB_MAX_SLOTS];
+
+		for (i = 0; i < STUB_MAX_SLOTS; i++) {
+			int src = tramp_data->sockpair[i][0];
+			int moved = fcntl(src, F_DUPFD,
+					  STUB_SOCK_BASE + STUB_MAX_SLOTS);
+
+			if (moved < 0)
+				exit(8);
+			close(src);
+			child[i] = moved;
+			if (src == 0 ||
+			    (src >= STUB_SOCK_BASE &&
+			     src < STUB_SOCK_BASE + STUB_MAX_SLOTS)) {
+				/*
+				 * Say that the collision happened -- it is the
+				 * difference between "the fix is exercised" and
+				 * "the boot never got near the bug" -- but not
+				 * once per mm: a busy boot hits it repeatedly.
+				 */
+				static int reported;
+
+				if (reported < 3) {
+					reported++;
+					printk(UM_KERN_INFO
+					       "stub: slot %d socket was at fd %d, moved to %d\n",
+					       i, src, moved);
+				}
+			}
+		}
+
+		/* dup2 signaling FD/socket to STDIN */
+		if (dup2(child[0], 0) < 0)
+			exit(3);
+		close(child[0]);
+
+		/*
+		 * Place the other slots' sockets at STUB_SOCK_BASE + slot and
+		 * let them survive the exec.
+		 */
+		for (i = 1; i < STUB_MAX_SLOTS; i++) {
+			if (dup2(child[i], STUB_SOCK_BASE + i) < 0)
+				exit(6);
+			close(child[i]);
+			fcntl(STUB_SOCK_BASE + i, F_SETFD, 0);
+		}
 	}
 
 	/* Write init_data and close write side */
