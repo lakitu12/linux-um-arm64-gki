@@ -456,6 +456,40 @@ static int userspace_tramp(void *data)
 	}
 
 	/*
+	 * Send init_data to the stub now, before any descriptor is installed.
+	 *
+	 * The write end is an ordinary descriptor of this process, and the
+	 * socket installation below reuses fd 0 and STUB_SOCK_BASE..+slot for
+	 * ends of those very pairs.  When the kernel's end happened to be
+	 * handed out at one of those numbers, dup2() quietly replaced it and
+	 * this write went to another pair's socket instead -- the stub then
+	 * blocks forever in its first read(0, &init_data, ..), the kernel
+	 * blocks in wait_stub_done_seccomp() waiting for a handoff that never
+	 * comes, and the guest task that was exec'ing sits in mm_alloc() for
+	 * as long as it lasts (an RCU stall with the task in state R, and a
+	 * boot that never finishes).  Queuing the bytes first makes the later
+	 * descriptors irrelevant.
+	 */
+	if (tramp_data->sockpair[0][1] == 0 ||
+	    (tramp_data->sockpair[0][1] >= STUB_SOCK_BASE &&
+	     tramp_data->sockpair[0][1] < STUB_SOCK_BASE + STUB_MAX_SLOTS)) {
+		static int reported;
+
+		if (reported < 3) {
+			reported++;
+			printk(UM_KERN_INFO
+			       "stub: init end was at fd %d, written before the sockets\n",
+			       tramp_data->sockpair[0][1]);
+		}
+	}
+
+	ret = write(tramp_data->sockpair[0][1], &init_data, sizeof(init_data));
+	close(tramp_data->sockpair[0][1]);
+
+	if (ret != sizeof(init_data))
+		exit(4);
+
+	/*
 	 * Move every socket end out of the way before installing any of them.
 	 *
 	 * socketpair() hands out the lowest free descriptors, and this process
@@ -521,13 +555,6 @@ static int userspace_tramp(void *data)
 			fcntl(STUB_SOCK_BASE + i, F_SETFD, 0);
 		}
 	}
-
-	/* Write init_data and close write side */
-	ret = write(tramp_data->sockpair[0][1], &init_data, sizeof(init_data));
-	close(tramp_data->sockpair[0][1]);
-
-	if (ret != sizeof(init_data))
-		exit(4);
 
 	/* Raw execveat for compatibility with older libc versions */
 	syscall(__NR_execveat, stub_exe_fd, (unsigned long)"",
