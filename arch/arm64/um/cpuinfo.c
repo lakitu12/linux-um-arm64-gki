@@ -166,12 +166,24 @@ static void show_host_cpus(struct seq_file *m)
 	 HWCAP_SB)
 
 /*
- * Nothing from AT_HWCAP2 is advertised. Its bits are overwhelmingly SVE2, SME,
- * MTE and BTI -- all state-bearing or needing kernel support UML lacks. The few
- * instruction-only bits there are not worth the audit surface until something
- * actually needs them.
+ * AT_HWCAP2 is the same audit from the other direction: let through only the
+ * bits that are again instructions over the X, V and PSTATE state UML already
+ * saves and restores.
+ *
+ *   DCPODP   DC CVADP, a cache-maintenance hint: no architectural state.
+ *   FLAGM2   CFINV/XAFLAG/AXFLAG: NZCV, and all four flags are in
+ *            UM_PSTATE_WRITABLE, so a signal frame carries them.
+ *   FRINT    FRINT32Z/32X/64Z/64X: V registers plus the FPSR QC flag, which
+ *            fpsimd_context carries.
+ *   I8MM     USDOT/SUDOT/SMMLA/USMMLA: V registers again.
+ *
+ * The rest of the vector is state-bearing or needs kernel support: SVE2 and SME
+ * (Z/P/ZA), MTE (tags and tag-fault delivery), BTI (PROT_BTI, which
+ * arch/arm64/um/asm/mman.h does not implement), GCS. On a host that has none of
+ * the allowed bits this stays 0 and nothing changes.
  */
-#define UM_ARM64_HWCAP2_ALLOWED	0UL
+#define UM_ARM64_HWCAP2_ALLOWED						\
+	(HWCAP2_DCPODP | HWCAP2_FLAGM2 | HWCAP2_FRINT | HWCAP2_I8MM)
 
 unsigned long um_arm64_elf_hwcap;
 unsigned long um_arm64_elf_hwcap2;
@@ -242,6 +254,21 @@ static const struct {
 	{ HWCAP_SB,		"sb" },
 };
 
+/*
+ * Same table, second word. arm64 prints both vectors into the one "Features"
+ * line -- there is no separate "Features2" key -- so the split here is only
+ * which mask a name is tested against.
+ */
+static const struct {
+	unsigned long bit;
+	const char *name;
+} um_arm64_hwcap2_names[] = {
+	{ HWCAP2_DCPODP,	"dcpodp" },
+	{ HWCAP2_FLAGM2,	"flagm2" },
+	{ HWCAP2_FRINT,		"frint" },
+	{ HWCAP2_I8MM,		"i8mm" },
+};
+
 void arch_show_cpuinfo_ident(struct seq_file *m)
 {
 	/*
@@ -272,6 +299,9 @@ void arch_show_cpuinfo(struct seq_file *m, int cpu)
 	for (i = 0; i < ARRAY_SIZE(um_arm64_hwcap_names); i++)
 		if (um_arm64_elf_hwcap & um_arm64_hwcap_names[i].bit)
 			seq_printf(m, " %s", um_arm64_hwcap_names[i].name);
+	for (i = 0; i < ARRAY_SIZE(um_arm64_hwcap2_names); i++)
+		if (um_arm64_elf_hwcap2 & um_arm64_hwcap2_names[i].bit)
+			seq_printf(m, " %s", um_arm64_hwcap2_names[i].name);
 	seq_puts(m, "\n");
 
 	seq_printf(m, "hwcap\t\t: 0x%lx\n", um_arm64_elf_hwcap);
