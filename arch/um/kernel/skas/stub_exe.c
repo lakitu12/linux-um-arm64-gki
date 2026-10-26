@@ -128,6 +128,10 @@ noinline static void spawn_stub_threads(unsigned long slot_base)
 		unsigned long stack_top = base + STUB_SLOT_SIZE - 16;
 		long res;
 
+		/* Where the trampoline left this slot's socket, and which
+		 * descriptors it may use to pass descriptors. */
+		((struct stub_data *)base)->sock_fd = STUB_SOCK_BASE + i;
+
 		res = stub_syscall5(__NR_clone, UML_STUB_CLONE_FLAGS,
 				    stack_top, 0, 0, 0);
 		if (res == 0) {
@@ -204,9 +208,20 @@ noinline static void real_init(void)
 	if (res != init_data.stub_start + STUB_DATA_OFFSET)
 		stub_syscall1(__NR_exit, 12);
 
-	/* In SECCOMP mode, we only need the signalling FD from now on */
+	/*
+	 * In SECCOMP mode, only the signalling descriptors are needed from now
+	 * on: fd 0 for slot 0 and [STUB_SOCK_BASE, STUB_SOCK_BASE+STUB_MAX_SLOTS)
+	 * for the rest of the pool (userspace_tramp() put them there).  The
+	 * memory fd is closed on purpose -- it maps all of physical memory, and
+	 * guest code can reach the stub's page, so leaving it open would hand
+	 * a guest an escape primitive rather than save a syscall.
+	 */
 	if (init_data.seccomp) {
-		res = stub_syscall3(__NR_close_range, 1, ~0U, 0);
+		res = stub_syscall3(__NR_close_range, 1, STUB_SOCK_BASE - 1, 0);
+		if (res == 0)
+			res = stub_syscall3(__NR_close_range,
+					    STUB_SOCK_BASE + STUB_MAX_SLOTS,
+					    ~0U, 0);
 		if (res != 0)
 			stub_syscall1(__NR_exit, 13);
 	}
@@ -222,6 +237,7 @@ noinline static void real_init(void)
 
 		stack.ss_sp = (void *)d0->sigstack;
 		stack.ss_size = sizeof(d0->sigstack);
+		d0->sock_fd = 0;
 	}
 	stub_syscall2(__NR_sigaltstack, (unsigned long)&stack, 0);
 

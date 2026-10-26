@@ -66,6 +66,14 @@
  */
 #define STUB_MAX_SLOTS 8
 /*
+ * Where the stub's per-slot descriptor-passing sockets live in its own
+ * descriptor table.  High on purpose: the stub's close_range() sweep keeps
+ * [STUB_SOCK_BASE, STUB_SOCK_BASE + STUB_MAX_SLOTS) and closes everything
+ * else, and a low fixed number could collide with the physmem fd that the
+ * trampoline deliberately leaves open for the first two mappings.
+ */
+#define STUB_SOCK_BASE 200
+/*
  * A slot is the stub_data (handoff word, register save area, pending syscall
  * queue, signal stack) plus a stack for the stub thread that owns it.  The
  * thread needs a stack of its own while it is parked waiting for work; the

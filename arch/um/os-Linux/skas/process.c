@@ -157,9 +157,16 @@ __uml_setup("seccomp_spin=", uml_seccomp_spin_setup,
 "    the polling when the peer keeps being slow. 0 disables polling.\n"
 "    Default: 10 (SECCOMP_SPIN_DEFAULT_US).\n\n");
 
-void wait_stub_done_seccomp(struct mm_id *mm_idp, int running, int wait_sigsys)
+/*
+ * @slot names which of the mm's task slots this handoff belongs to: its
+ * stub_data, its futex and its descriptor socket.  Slot 0 is the thread the
+ * trampoline exec'd; the rest are the threads it cloned before the seccomp
+ * filter went in (docs §12.35).
+ */
+void wait_stub_done_seccomp(struct mm_id *mm_idp, int slot, int running,
+			    int wait_sigsys)
 {
-	struct stub_data *data = STUB_DATA_SLOT(mm_idp, 0);
+	struct stub_data *data = STUB_DATA_SLOT(mm_idp, slot);
 	unsigned long budget;
 	unsigned int futex_val;
 	int ret;
@@ -180,6 +187,14 @@ void wait_stub_done_seccomp(struct mm_id *mm_idp, int running, int wait_sigsys)
 		};
 
 		if (!running) {
+			/*
+			 * Tell the stub how many descriptors to expect. It
+			 * reads this after waking and only recvmsg()s when it
+			 * is non-zero, so a batch with no descriptors never
+			 * touches the socket at all.
+			 */
+			data->syscall_fd_num = mm_idp->syscall_fd_num;
+
 			if (mm_idp->syscall_fd_num) {
 				unsigned int fds_size =
 					sizeof(int) * mm_idp->syscall_fd_num;
@@ -194,8 +209,8 @@ void wait_stub_done_seccomp(struct mm_id *mm_idp, int running, int wait_sigsys)
 				memcpy(CMSG_DATA(cmsg), mm_idp->syscall_fd_map,
 				       fds_size);
 
-				CATCH_EINTR(syscall(__NR_sendmsg, mm_idp->sock,
-						&msgh, 0));
+				CATCH_EINTR(syscall(__NR_sendmsg,
+						mm_idp->sock[slot], &msgh, 0));
 			}
 
 			data->signal = 0;
@@ -359,8 +374,14 @@ static int stub_exe_fd;
 
 struct tramp_data {
 	struct stub_data *stub_data;
-	/* 0 is inherited, 1 is the kernel side */
-	int sockpair[2];
+	/*
+	 * One pair per task slot (docs §12.35): [slot][0] is inherited by the
+	 * stub and lands on STUB_SOCK_BASE + slot in its descriptor table,
+	 * [slot][1] stays with the kernel.  Slot 0 doubles as the channel that
+	 * carries init_data at startup, so its inherited end is also dup2'd to
+	 * fd 0.
+	 */
+	int sockpair[STUB_MAX_SLOTS][2];
 };
 
 #ifndef CLOSE_RANGE_CLOEXEC
@@ -377,7 +398,7 @@ static int userspace_tramp(void *data)
 		.stub_start = STUB_START,
 	};
 	struct iomem_region *iomem;
-	int ret;
+	int ret, i;
 
 	if (using_seccomp) {
 		init_data.signal_handler = STUB_CODE +
@@ -417,13 +438,47 @@ static int userspace_tramp(void *data)
 	}
 
 	/* dup2 signaling FD/socket to STDIN */
-	if (dup2(tramp_data->sockpair[0], 0) < 0)
+	if (dup2(tramp_data->sockpair[0][0], 0) < 0)
 		exit(3);
-	close(tramp_data->sockpair[0]);
+	close(tramp_data->sockpair[0][0]);
+
+	/*
+	 * Place the other slots' sockets at STUB_SOCK_BASE + slot and let them
+	 * survive the exec.  The stub keeps exactly that range open (see
+	 * real_init's close_range sweep) and every slot finds its socket by
+	 * number, so nothing has to be discovered at run time.
+	 *
+	 * Slot 0's socket is fd 0, where the dup2 above put it, so its
+	 * STUB_SOCK_BASE entry is left unused -- the sweep and the numbering
+	 * stay uniform, which matters more than one wasted descriptor.
+	 */
+	if (init_data.stub_data_fd >= STUB_SOCK_BASE &&
+	    init_data.stub_data_fd < STUB_SOCK_BASE + STUB_MAX_SLOTS) {
+		/*
+		 * The memory fd is about to be run over by a socket. It cannot
+		 * be: it is what the next two mappings are made from. Move it
+		 * out of the reserved range rather than fail the boot on a
+		 * host that happened to hand out that number.
+		 */
+		int moved = fcntl(init_data.stub_data_fd, F_DUPFD,
+				  STUB_SOCK_BASE + STUB_MAX_SLOTS);
+
+		if (moved < 0)
+			exit(7);
+		init_data.stub_code_fd = moved;
+		init_data.stub_data_fd = moved;
+	}
+
+	for (i = 1; i < STUB_MAX_SLOTS; i++) {
+		if (dup2(tramp_data->sockpair[i][0], STUB_SOCK_BASE + i) < 0)
+			exit(6);
+		close(tramp_data->sockpair[i][0]);
+		fcntl(STUB_SOCK_BASE + i, F_SETFD, 0);
+	}
 
 	/* Write init_data and close write side */
-	ret = write(tramp_data->sockpair[1], &init_data, sizeof(init_data));
-	close(tramp_data->sockpair[1]);
+	ret = write(tramp_data->sockpair[0][1], &init_data, sizeof(init_data));
+	close(tramp_data->sockpair[0][1]);
 
 	if (ret != sizeof(init_data))
 		exit(4);
@@ -596,7 +651,7 @@ int start_userspace(struct mm_id *mm_id)
 	};
 	void *stack;
 	unsigned long sp;
-	int status, n, err;
+	int status, n, err, i;
 
 	/* setup a temporary stack page */
 	stack = mmap(NULL, UM_KERN_PAGE_SIZE,
@@ -612,31 +667,46 @@ int start_userspace(struct mm_id *mm_id)
 	/* set stack pointer to the end of the stack page, so it can grow downwards */
 	sp = (unsigned long)stack + UM_KERN_PAGE_SIZE;
 
-	/* socket pair for init data and SECCOMP FD passing (no CLOEXEC here) */
-	if (socketpair(AF_UNIX, SOCK_STREAM, 0, tramp_data.sockpair)) {
-		err = -errno;
-		printk(UM_KERN_ERR "%s : socketpair failed, errno = %d\n",
-		       __func__, errno);
-		return err;
+	/*
+	 * Socket pairs for init data and SECCOMP descriptor passing: one per
+	 * task slot, so that the descriptors the kernel sends for a batch can
+	 * only be read by the stub thread that will use them (docs §12.35).
+	 * No CLOEXEC here: the child end has to survive the exec, and
+	 * userspace_tramp() decides what else does.
+	 */
+	for (i = 0; i < STUB_MAX_SLOTS; i++) {
+		if (socketpair(AF_UNIX, SOCK_STREAM, 0, tramp_data.sockpair[i])) {
+			err = -errno;
+			printk(UM_KERN_ERR "%s : socketpair failed, errno = %d\n",
+			       __func__, errno);
+			goto out_sockets;
+		}
 	}
 
 	if (using_seccomp) {
-		proc_data->futex = FUTEX_IN_CHILD;
 		/*
 		 * Convert the microsecond budget into counter ticks once per
 		 * stub, before it first runs; the stub cannot compute this
 		 * itself without re-reading the counter frequency on every
-		 * trap. stub_cycles_per_us() is 0 where no constant-rate EL0
-		 * counter is available (x86), which disables the spin but
-		 * keeps the waiter-bit protocol.
+		 * trap.  No usable cycle counter means no bounded spin: the
+		 * budget would be meaningless and the register read is not even
+		 * guaranteed to be legal (see check_stub_cycles()).
+		 *
+		 * Every slot needs this, not just slot 0: a slot with a zero
+		 * budget parks in FUTEX_WAIT on every handoff instead of
+		 * spinning out the reply, which turns a ~1us handoff into two
+		 * context switches.  Measured on this device: with the pool
+		 * live and only slot 0 initialised, guest user-mode work went
+		 * 249ms -> 1201ms against stub_slots=1 -- a single-threaded
+		 * workload paying for a wakeup on every timer tick.
 		 */
-		/*
-	 * No usable cycle counter means no bounded spin: the budget would be
-	 * meaningless and the register read is not even guaranteed to be legal.
-	 * See check_stub_cycles().
-	 */
-	proc_data->spin_ticks = have_stub_cycles ?
-		seccomp_spin_us * stub_cycles_per_us() : 0;
+		for (i = 0; i < STUB_MAX_SLOTS; i++) {
+			struct stub_data *d = STUB_DATA_SLOT(mm_id, i);
+
+			d->futex = FUTEX_IN_CHILD;
+			d->spin_ticks = have_stub_cycles ?
+				seccomp_spin_us * stub_cycles_per_us() : 0;
+		}
 	}
 
 	mm_id->pid = clone(userspace_tramp, (void *) sp,
@@ -650,7 +720,7 @@ int start_userspace(struct mm_id *mm_id)
 	}
 
 	if (using_seccomp) {
-		wait_stub_done_seccomp(mm_id, 1, 1);
+		wait_stub_done_seccomp(mm_id, 0, 1, 1);
 	} else {
 		do {
 			CATCH_EINTR(n = waitpid(mm_id->pid, &status,
@@ -703,19 +773,24 @@ int start_userspace(struct mm_id *mm_id)
 		goto out_kill;
 	}
 
-	close(tramp_data.sockpair[0]);
-	if (using_seccomp)
-		mm_id->sock = tramp_data.sockpair[1];
-	else
-		close(tramp_data.sockpair[1]);
+	for (i = 0; i < STUB_MAX_SLOTS; i++) {
+		close(tramp_data.sockpair[i][0]);
+		if (using_seccomp)
+			mm_id->sock[i] = tramp_data.sockpair[i][1];
+		else
+			close(tramp_data.sockpair[i][1]);
+	}
 
 	return 0;
 
 out_kill:
 	os_kill_ptraced_process(mm_id->pid, 1);
 out_close:
-	close(tramp_data.sockpair[0]);
-	close(tramp_data.sockpair[1]);
+	for (i = 0; i < STUB_MAX_SLOTS; i++) {
+		close(tramp_data.sockpair[i][0]);
+		close(tramp_data.sockpair[i][1]);
+	}
+out_sockets:
 
 	mm_id->pid = -1;
 
@@ -749,18 +824,72 @@ static int at_syscall_insn(int pid, unsigned long pc)
 }
 #endif
 
+/*
+ * Move the mm's pending map/unmap batch into the slot that is about to run
+ * guest code.
+ *
+ * The batch is built by the fault path in the control slot (slot 0) and, in
+ * seccomp mode, shipped to the guest in the same handoff that resumes it, so
+ * applying it costs nothing extra.  A handoff on any other slot has to carry
+ * the same bytes, because the stub thread that wakes is the one that has to
+ * make those mmap/munmap calls before the guest can run.
+ */
+static void ship_stub_batch(struct mm_id *mm_id, struct stub_data *d, int slot)
+{
+	struct stub_data *ctl = STUB_DATA_SLOT(mm_id, 0);
+	int len = mm_id->syscall_data_len;
+
+	if (slot == 0 || !len) {
+		d->syscall_data_len = len;
+		return;
+	}
+
+	if (len > 0)
+		memcpy(d->syscall_data, ctl->syscall_data,
+		       len * sizeof(d->syscall_data[0]));
+	d->err = 0;
+	d->syscall_data_len = len;
+	ctl->syscall_data_len = 0;
+}
+
+/* Put an error report where syscall_stub_dump_error() will find it. */
+static void unship_stub_batch(struct mm_id *mm_id, struct stub_data *d, int slot)
+{
+	struct stub_data *ctl = STUB_DATA_SLOT(mm_id, 0);
+	int len = d->syscall_data_len;
+
+	if (slot == 0)
+		return;
+
+	if (len > 0)
+		memcpy(ctl->syscall_data, d->syscall_data,
+		       len * sizeof(d->syscall_data[0]));
+	else
+		len = mm_id->syscall_data_len;
+	ctl->err = d->err;
+	ctl->syscall_data_len = len;
+	mm_id->syscall_data_len = len;
+}
+
 void userspace(struct uml_pt_regs *regs)
 {
 	int err, status, op;
 	siginfo_t si_local;
 	siginfo_t *si;
-	int sig;
+	int sig, slot;
 
 	/* Handle any immediate reschedules or signals */
 	interrupt_end();
 
 	while (1) {
 		struct mm_id *mm_id = current_mm_id();
+
+		/*
+		 * Claim first, and outside the turnstile: a task that waited for a
+		 * slot while holding the turnstile would be waiting for the tasks
+		 * that hold the slots to give them back, and they cannot run.
+		 */
+		slot = stub_slot_get(mm_id);
 
 		/*
 		 * At any given time, only one CPU thread can enter the
@@ -797,7 +926,7 @@ void userspace(struct uml_pt_regs *regs)
 		current_mm_sync();
 
 		if (using_seccomp) {
-			struct stub_data *proc_data = STUB_DATA_SLOT(mm_id, 0);
+			struct stub_data *proc_data = STUB_DATA_SLOT(mm_id, slot);
 
 			err = set_stub_state(regs, proc_data, singlestepping());
 			if (err) {
@@ -811,15 +940,16 @@ void userspace(struct uml_pt_regs *regs)
 				panic("Programming error: Flag to only run syscalls in child was not cleared!");
 
 			/* Mark pending syscalls for flushing */
-			proc_data->syscall_data_len = mm_id->syscall_data_len;
+			ship_stub_batch(mm_id, proc_data, slot);
 
-			wait_stub_done_seccomp(mm_id, 0, 0);
+			wait_stub_done_seccomp(mm_id, slot, 0, 0);
 
 			sig = proc_data->signal;
 
 			if (sig == SIGTRAP && proc_data->err != 0) {
 				printk(UM_KERN_ERR "%s - Error flushing stub syscalls",
 				       __func__);
+				unship_stub_batch(mm_id, proc_data, slot);
 				syscall_stub_dump_error(mm_id);
 				mm_id->syscall_data_len = proc_data->err;
 				fatal_sigsegv();
@@ -1080,6 +1210,14 @@ void userspace(struct uml_pt_regs *regs)
 		}
 
 		exit_turnstile(mm_id);
+		/*
+		 * The handoff is over and everything this task needs from the
+		 * slot has been copied out of it (registers, siginfo), so the
+		 * slot can go back to the pool before the trap is handled.
+		 * Handling it is what queues the next batch of mappings, and
+		 * that goes to the control slot, not to this one.
+		 */
+		stub_slot_put(mm_id, slot);
 
 		UPT_SYSCALL_NR(regs) = -1; /* Assume: It's not a syscall */
 

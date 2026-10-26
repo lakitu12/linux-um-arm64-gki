@@ -26,7 +26,8 @@ int timer_alarm_pending(void);
  * skas/process.c
  */
 void wait_stub_done(int pid);
-void wait_stub_done_seccomp(struct mm_id *mm_idp, int running, int wait_sigsys);
+void wait_stub_done_seccomp(struct mm_id *mm_idp, int slot, int running,
+			    int wait_sigsys);
 
 /*
  * smp.c

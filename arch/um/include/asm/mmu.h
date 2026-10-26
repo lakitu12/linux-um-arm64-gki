@@ -14,6 +14,8 @@
 typedef struct mm_context {
 	struct mm_id id;
 	struct mutex turnstile;
+	/* Protects the task-slot pool in id (docs §12.35). */
+	struct mutex slot_lock;
 
 	struct list_head list;
 
@@ -39,6 +41,7 @@ typedef struct mm_context {
 #define INIT_MM_CONTEXT(mm)						\
 	.context = {							\
 		.turnstile = __MUTEX_INITIALIZER(mm.context.turnstile),	\
+		.slot_lock = __MUTEX_INITIALIZER(mm.context.slot_lock),	\
 		.sync_tlb_lock = __SPIN_LOCK_INITIALIZER(mm.context.sync_tlb_lock), \
 	}
 

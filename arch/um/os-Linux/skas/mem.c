@@ -105,7 +105,7 @@ static inline long do_syscall_stub(struct mm_id *mm_idp)
 
 	if (using_seccomp) {
 		proc_data->restart_wait = 1;
-		wait_stub_done_seccomp(mm_idp, 0, 1);
+		wait_stub_done_seccomp(mm_idp, 0, 0, 1);
 	} else {
 		n = put_host_regs(pid, syscall_regs);
 		if (n < 0) {

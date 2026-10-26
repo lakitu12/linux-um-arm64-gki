@@ -119,6 +119,27 @@ struct stub_data {
 	int syscall_data_len;
 
 	/*
+	 * Number of descriptors sent with this handoff (kernel-side, written
+	 * before the word flips).  The stub reads it after waking and only
+	 * calls recvmsg() when it is non-zero: a thread that recvmsg()s
+	 * unconditionally can consume a message addressed to another slot,
+	 * because a socket carries whatever the kernel sent next, not what
+	 * this slot was promised.
+	 */
+	int syscall_fd_num;
+
+	/*
+	 * This slot's descriptor-passing socket, as the stub sees it.  Written
+	 * once per slot before it parks, next to the sigaltstack.  One socket
+	 * per slot is what keeps descriptor passing correct once several slots
+	 * are in flight at the same time: with a single mm-wide socket the
+	 * kernel's sendmsg() and the woken thread's recvmsg() are not paired,
+	 * and two batches needing different descriptors could swap them --
+	 * a silently wrong mapping, not a crash.
+	 */
+	int sock_fd;
+
+	/*
 	 * The handoff word, alone in a 64-byte slot. Both sides poll it now
 	 * (see stub-futex.h); if it shared a cacheline with anything the peer
 	 * writes -- syscall_data, signal, the spin state -- each such write

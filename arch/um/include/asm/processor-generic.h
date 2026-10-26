@@ -33,6 +33,18 @@ struct thread_struct {
 
 	void *segv_continue;
 
+	/*
+	 * The task slot this task last ran guest code on (docs §12.35).  A
+	 * hint, not a reservation: the slot is claimed and released around
+	 * every user-mode entry.  It exists so that a task keeps coming back
+	 * to the same stub thread instead of being spread over the pool --
+	 * the stub thread is a host thread, so migrating a guest task between
+	 * them also migrates it across host cores, and measured on this
+	 * device a single-threaded guest workload got 4.3x slower when every
+	 * entry landed on a different slot.
+	 */
+	int stub_slot;
+
 	/* Contains variable sized FP registers */
 	struct pt_regs regs;
 };
@@ -42,7 +54,8 @@ struct thread_struct {
 	.regs		   	= EMPTY_REGS,	\
 	.prev_sched		= NULL, \
 	.arch			= INIT_ARCH_THREAD, \
-	.request		= { } \
+	.request		= { }, \
+	.stub_slot		= 0 \
 }
 
 /*

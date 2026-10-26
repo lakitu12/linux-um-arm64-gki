@@ -180,21 +180,36 @@ restart_wait:
 	}
 
 	if (d->syscall_data_len) {
-		/* Read passed FDs (if any) */
-		do {
-			res = stub_syscall3(__NR_recvmsg, 0, (unsigned long)&msghdr, 0);
-		} while (res == -EINTR);
-
-		/* We should never have a receive error (other than -EAGAIN) */
-		if (res < 0 && res != -EAGAIN)
-			stub_syscall1(__NR_exit_group, 1);
-
-		/* Receive the FDs */
 		num_fds = 0;
-		fd_msg = msghdr.msg_control;
-		fd_map = (void *)CMSG_DATA(fd_msg);
-		if (res == iov.iov_len && msghdr.msg_controllen > sizeof(struct cmsghdr))
-			num_fds = (fd_msg->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+		fd_map = NULL;
+
+		/*
+		 * Read the descriptors this handoff carried.  Asking the
+		 * question first is what makes the socket usable from more
+		 * than one slot: recvmsg() alone would happily take a message
+		 * the kernel sent for another slot's batch, and the two
+		 * batches need not reference the same descriptors. With the
+		 * physmem fd inherited (STUB_FD_INHERITED) the common batch
+		 * carries none at all and this costs nothing.
+		 */
+		if (d->syscall_fd_num) {
+			do {
+				res = stub_syscall3(__NR_recvmsg, d->sock_fd,
+						    (unsigned long)&msghdr, 0);
+			} while (res == -EINTR);
+
+			/* We should never have a receive error (other than -EAGAIN) */
+			if (res < 0 && res != -EAGAIN)
+				stub_syscall1(__NR_exit_group, 1);
+
+			/* Receive the FDs */
+			fd_msg = msghdr.msg_control;
+			fd_map = (void *)CMSG_DATA(fd_msg);
+			if (res == iov.iov_len &&
+			    msghdr.msg_controllen > sizeof(struct cmsghdr))
+				num_fds = (fd_msg->cmsg_len - CMSG_LEN(0)) /
+					  sizeof(int);
+		}
 
 		/* Try running queued syscalls. */
 		res = syscall_handler(fd_map);
