@@ -147,9 +147,18 @@ int __init main(int argc, char **argv, char **envp)
 	install_fatal_handler(SIGINT);
 	install_fatal_handler(SIGTERM);
 
-#ifdef CONFIG_ARCH_REUSE_HOST_VSYSCALL_AREA
+	/*
+	 * The host's auxiliary vector is where UML learns what the host CPU can
+	 * do.  On x86 it also carries the vsyscall page address, which is why
+	 * this used to be gated on CONFIG_ARCH_REUSE_HOST_VSYSCALL_AREA; arm64
+	 * has no vsyscall page, but AT_HWCAP, AT_HWCAP2 and AT_MINSIGSTKSZ are
+	 * its entire feature story.  Gating the scan on the x86-only symbol left
+	 * elf_aux_hwcap zero on arm64: every guest saw "Features" empty and
+	 * glibc's ifunc resolvers picked the generic routines.  Scanning where
+	 * the values are unused costs one pass over a handful of words, so do it
+	 * unconditionally.
+	 */
 	scan_elf_aux(envp);
-#endif
 
 	change_sig(SIGPIPE, 0);
 	ret = linux_main(argc, argv, envp);
