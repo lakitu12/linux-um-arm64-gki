@@ -20,6 +20,15 @@
 #include <skas.h>
 
 /*
+ * Faults on a page the sync layer had already published to the host (see the
+ * re-arm in handle_page_fault).  Zero on a healthy guest; each one that is not
+ * zero is a mapping the host had lost.  Counted rather than scanned because the
+ * only way to know a host mapping is missing is to try and use it, and this is
+ * that attempt.
+ */
+static atomic64_t um_stale_pte_faults;
+
+/*
  * NOTE: UML does not have exception tables. As such, this is almost a copy
  * of the code in mm/memory.c, only adjusting the logic to simply check whether
  * we are coming from the kernel instead of doing an additional lookup in the
@@ -405,6 +414,7 @@ int handle_page_fault(unsigned long address, unsigned long ip,
 	struct vm_area_struct *vma;
 	pmd_t *pmd;
 	pte_t *pte;
+	pte_t orig = { .pte = 0 };	/* the PTE as it was before this fault */
 	int err = -EFAULT;
 	unsigned int flags = FAULT_FLAG_DEFAULT;
 
@@ -433,6 +443,27 @@ retry:
 		/* Don't require VM_READ|VM_EXEC for write faults! */
 		if (!(vma->vm_flags & (VM_READ | VM_EXEC)))
 			goto out;
+	}
+
+	/*
+	 * Snapshot the PTE before the fault runs, for the "the fault had nothing
+	 * to do" case further down.  mmap_read_lock is held (or a killable read
+	 * lock we will release at out/out_nosemaphore), so this cannot race with
+	 * a zap.
+	 *
+	 * virt_to_pte(), not pmd_off()/pte_offset_kernel(): the page-table walk
+	 * must check every level.  A brand-new mm (exec) has no pud table for
+	 * the address yet, and pmd_off() does not care -- it turns the empty
+	 * upper entry into (pmd_t *)uml_physmem, i.e. the kernel image, and
+	 * dereferencing that is a kernel-mode SIGSEGV at whatever word happens
+	 * to have bit 0 set (docs §12.46.11: panicked twice on the first
+	 * patch build, once in elf_load's __clear_user of a new stack).
+	 */
+	{
+		pte_t *opte = virt_to_pte(mm, address);
+
+		if (opte)
+			orig.pte = READ_ONCE(opte->pte);
 	}
 
 	do {
@@ -478,6 +509,39 @@ retry:
 	 */
 	if (is_user && !um_prefault_around(mm, vma, address, flags))
 		goto out_nosemaphore;
+
+	/*
+	 * Re-arm the page that faulted, but only for the case that used to be
+	 * permanent: the PTE was already present, writable, and *synced*, i.e.
+	 * the sync layer believed this page was mapped, so the fault above had
+	 * nothing to install and nothing marked the page.  If that belief is
+	 * wrong -- a sync that raced with this PTE and cleared NEEDSYNC without
+	 * installing it -- then no later fault can repair it either, because the
+	 * PTE still looks present, and the guest re-faults on the same store
+	 * forever (docs §12.46.11: ~2e5 faults/s, an app wedged for 600 s).
+	 *
+	 * The guard is narrow on purpose.  Dirty+writable+synced is the only
+	 * state that cannot make progress: the host mapping was installed
+	 * writable, so the fault is not the dirty-bit handshake.  A *clean*
+	 * writable PTE also faults on the first write (UML maps clean pages
+	 * read-only, that is how the dirty bit is emulated), but generic code
+	 * dirties it and the sync re-maps it -- measured, not assumed: with
+	 * pte_dirty() left out this fired 308 times in one 180 s run, all of
+	 * them clean pages, all of them self-healing.  Requiring that the PTE
+	 * has not changed as well keeps the counter meaning "a mapping was
+	 * lost" instead of "someone wrote a clean page".
+	 */
+	if (is_user && pte_present(orig) && pte_write(orig) &&
+	    pte_dirty(orig) && !pte_needsync(orig) &&
+	    READ_ONCE(pte->pte) == orig.pte) {
+		um_pte_set_needsync(pte);
+		um_tlb_mark_sync(mm, address & PAGE_MASK,
+				 (address & PAGE_MASK) + PAGE_SIZE);
+		pr_info_ratelimited("um: fault on an already-synced pte %lx by %s (%s), orig %lx, re-arming (%lld so far)\n",
+				    address, current->comm,
+				    is_write ? "write" : "read", (unsigned long)orig.pte,
+				    (long long)atomic64_inc_return(&um_stale_pte_faults));
+	}
 
 	/*
 	 * The below warning was added in place of

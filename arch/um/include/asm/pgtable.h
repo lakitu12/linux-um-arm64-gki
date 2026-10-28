@@ -211,13 +211,51 @@ static inline pte_t pte_mkneedsync(pte_t pte)
 
 static inline void set_pte(pte_t *pteptr, pte_t pteval)
 {
-	pte_copy(*pteptr, pteval);
-
-	/* If it's a swap entry, it needs to be marked _PAGE_NEEDSYNC so
+	/*
+	 * If it's a swap entry, it needs to be marked _PAGE_NEEDSYNC so
 	 * update_pte_range knows to unmap it.
+	 *
+	 * One store, not a read-modify-write: the sync walk in tlb.c reads this
+	 * word from another vCPU with no lock between them (see
+	 * um_pte_clear_needsync()), and a two-step write here only widens the
+	 * window in which it can put back what it read.
 	 */
+	WRITE_ONCE(pteptr->pte, pteval.pte | _PAGE_NEEDSYNC);
+}
 
-	*pteptr = pte_mkneedsync(*pteptr);
+/*
+ * The PTE word is written by whichever vCPU takes the fault and read by
+ * whoever runs the sync walk, and there is no lock between them: the walk
+ * holds mm->context.sync_tlb_lock, set_pte() cannot afford to.
+ *
+ * So the walk clears NEEDSYNC with a compare-and-swap.  It must not clobber a
+ * PTE it did not look at, because that lost update is permanent: the guest PTE
+ * ends up present with no host mapping to match it, so no later fault marks the
+ * page again -- it just faults forever, in userspace, at hundreds of thousands
+ * of times a second (docs §12.46.11: a Qt Quick app wedged for 600 s this way).
+ */
+static inline bool um_pte_clear_needsync(pte_t *ptep, unsigned long seen)
+{
+	return cmpxchg(&ptep->pte, seen, seen & ~_PAGE_NEEDSYNC) == seen;
+}
+
+/*
+ * Mark a page for the next sync without losing a concurrent PTE update.  Used
+ * by the fault path to re-arm a page whose host mapping went missing: the
+ * guest PTE is fine, so this is the only thing that will ever map it again.
+ */
+static inline void um_pte_set_needsync(pte_t *ptep)
+{
+	unsigned long old = READ_ONCE(ptep->pte);
+
+	while (!(old & _PAGE_NEEDSYNC)) {
+		unsigned long prev = cmpxchg(&ptep->pte, old,
+					     old | _PAGE_NEEDSYNC);
+
+		if (prev == old)
+			break;
+		old = prev;
+	}
 }
 
 #define PFN_PTE_SHIFT		PAGE_SHIFT

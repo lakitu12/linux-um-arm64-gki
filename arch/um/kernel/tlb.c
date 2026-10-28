@@ -48,6 +48,15 @@ void report_enomem(void)
 			"vm.max_map_count has been reached.\n");
 }
 
+/*
+ * Counters for the two ways this walk can fail to install a mapping.  Both are
+ * expected to stay at zero; `sync_lost` is the one that used to turn into a
+ * permanently wedged guest process (docs §12.46.11), so it is worth seeing from
+ * dmesg in a soak dump.
+ */
+static atomic64_t um_pte_sync_lost;
+static atomic64_t um_pte_sync_err;
+
 static inline int update_pte_range(pmd_t *pmd, unsigned long addr,
 				   unsigned long end,
 				   struct vm_ops *ops)
@@ -57,22 +66,32 @@ static inline int update_pte_range(pmd_t *pmd, unsigned long addr,
 
 	pte = pte_offset_kernel(pmd, addr);
 	do {
-		if (!pte_needsync(*pte))
+		pte_t val;
+		unsigned int tries = 0;
+
+again:
+		/*
+		 * Read the whole PTE once and decide from that copy: the value can
+		 * change under us at any point, and mixing two reads would build a
+		 * mapping from a PTE that never existed.
+		 */
+		val.pte = READ_ONCE(pte->pte);
+		if (!pte_needsync(val))
 			continue;
 
-		if (pte_present(*pte)) {
+		if (pte_present(val)) {
 			__u64 offset;
-			unsigned long phys = pte_val(*pte) & PAGE_MASK;
+			unsigned long phys = pte_val(val) & PAGE_MASK;
 			int fd = phys_mapping(phys, &offset);
 			int r, w, x, prot;
 
-			r = pte_read(*pte);
-			w = pte_write(*pte);
-			x = pte_exec(*pte);
-			if (!pte_young(*pte)) {
+			r = pte_read(val);
+			w = pte_write(val);
+			x = pte_exec(val);
+			if (!pte_young(val)) {
 				r = 0;
 				w = 0;
-			} else if (!pte_dirty(*pte))
+			} else if (!pte_dirty(val))
 				w = 0;
 
 			prot = (r ? UM_PROT_READ : 0) |
@@ -84,8 +103,32 @@ static inline int update_pte_range(pmd_t *pmd, unsigned long addr,
 		} else
 			ret = ops->unmap(ops->mm_idp, addr, PAGE_SIZE);
 
-		*pte = pte_mkuptodate(*pte);
-	} while (pte++, addr += PAGE_SIZE, ((addr < end) && !ret));
+		if (ret)
+			break;
+
+		/*
+		 * Clear the bit only if the PTE is still the one we just mapped.
+		 * If it is not, the page was changed while we were in the
+		 * syscall; leave the *new* value alone (it carries its own
+		 * NEEDSYNC) and map that instead.  Clobbering it here is how a
+		 * guest page ends up present with no host mapping.
+		 */
+		if (!um_pte_clear_needsync(pte, val.pte)) {
+			atomic64_inc(&um_pte_sync_lost);
+			pr_info_ratelimited("um: pte %lx changed under the sync walk (retry, %lld so far)\n",
+					    addr, (long long)atomic64_read(&um_pte_sync_lost));
+			if (++tries < 8)
+				goto again;
+			/* Leave NEEDSYNC set: the next sync gets this page. */
+		}
+	} while (pte++, addr += PAGE_SIZE, (addr < end));
+
+	if (ret) {
+		atomic64_inc(&um_pte_sync_err);
+		pr_info_ratelimited("um: tlb sync failed at %lx: %d (%lld so far)\n",
+				    addr, ret, (long long)atomic64_read(&um_pte_sync_err));
+	}
+
 	return ret;
 }
 
@@ -196,6 +239,16 @@ int um_tlb_sync(struct mm_struct *mm)
 
 	if (ret == -ENOMEM)
 		report_enomem();
+
+	/*
+	 * On failure the range stays marked.  Dropping it used to strand every
+	 * page the walk had not reached yet: their NEEDSYNC was still set, but
+	 * nothing would ever walk them again, so the host mapping for those
+	 * addresses simply never appeared.  The pages processed before the error
+	 * have no NEEDSYNC left and are skipped for free on the retry.
+	 */
+	if (ret)
+		return ret;
 
 	mm->context.sync_tlb_range_from = 0;
 	mm->context.sync_tlb_range_to = 0;
