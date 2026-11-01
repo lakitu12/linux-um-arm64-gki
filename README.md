@@ -118,10 +118,10 @@ git rebase --onto gki-next <old-base> main
 ```
 
 Most of the commits only touch `arch/um`, `arch/arm64/um` and
-`tools/um-arm64` and replay clean. The ones that are known to need attention are the backports —
-6.18 predates the upstream fix they carry, so they are dropped once the new
-base has it — and the build fixes for warnings r28c turns on. Both groups are
-listed in [`docs/gki-notes.md`](docs/gki-notes.md).
+`tools/um-arm64` and replay clean. The two groups that need attention are the
+backports — 6.18 predates the upstream fix they carry, so they are dropped
+once the new base has it — and the build fixes for warnings r28c turns on.
+Both are listed in [`docs/gki-notes.md`](docs/gki-notes.md).
 
 ## Validation
 

@@ -314,19 +314,19 @@ jobs:
       - name: Marker boot gate
         run: |
           mkdir -p boot-out
-          bash ci/boot-gate.sh ci-artifacts/artifacts/linux-bionic boot-out | tee boot-out/summary.txt
+          bash ci/boot-gate.sh ci-artifacts/linux-bionic boot-out | tee boot-out/summary.txt
         shell: bash
 
       - name: qcow2 root-disk gate
         run: |
           mkdir -p boot-out-qcow2
-          bash ci/qcow2-gate.sh ci-artifacts/artifacts/linux-bionic boot-out-qcow2 | tee boot-out-qcow2/summary.txt
+          bash ci/qcow2-gate.sh ci-artifacts/linux-bionic boot-out-qcow2 | tee boot-out-qcow2/summary.txt
         shell: bash
 
       - name: UM framebuffer gate
         run: |
           mkdir -p boot-out-umfb
-          bash ci/umfb-gate.sh ci-artifacts/artifacts/linux-bionic boot-out-umfb | tee boot-out-umfb/summary.txt
+          bash ci/umfb-gate.sh ci-artifacts/linux-bionic boot-out-umfb | tee boot-out-umfb/summary.txt
         shell: bash
 
       - name: Upload boot log
@@ -376,7 +376,7 @@ jobs:
         if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.virtiogpu == 'true' }}
         run: |
           mkdir -p boot-out-vgpu
-          bash ci/virtio-gpu-gate.sh ci-artifacts/artifacts/linux-bionic boot-out-vgpu | tee boot-out-vgpu/summary.txt
+          bash ci/virtio-gpu-gate.sh ci-artifacts/linux-bionic boot-out-vgpu | tee boot-out-vgpu/summary.txt
         shell: bash
 
       - name: Upload virtio-gpu gate evidence
