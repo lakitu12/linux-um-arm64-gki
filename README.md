@@ -16,7 +16,9 @@ cost is in [`docs/smp.md`](docs/smp.md).
 ## Build
 
 Needs the Android NDK's clang (CI pins **r28c**) and the usual kernel build
-tools (`flex`, `bison`, `libelf-dev`, `zlib1g-dev`, `bc`, `cpio`).
+tools (`flex`, `bison`, `libelf-dev`, `zlib1g-dev`, `bc`, `cpio`). This is a
+full kernel tree — 1.7 GB checked out — so a build box that only consumes it
+can clone with `--depth=1`.
 
 ```sh
 cd tools/um-arm64
@@ -125,17 +127,18 @@ Both are listed in [`docs/gki-notes.md`](docs/gki-notes.md).
 
 ## Validation
 
-Baseline `android17-6.18` at **6.18.32**, NDK **r28c**, 16 KB guest pages:
-`linux-bionic` sha256 `03c3ef3b…a9410c`, `stub_exe_bionic` `83f51f7c…0781fc`
-(90,765,944 B, static, `for Android 30`). End to end, on an arm64 runner:
+Baseline `android17-6.18` at **6.18.32**, NDK **r28c**, 16 KB guest pages, on
+an arm64 runner:
 
-- build → boot the artifact, marker gate
-  ([38875955444](https://github.com/lakitu12/linux-um-arm64-gki/actions/runs/38875955444));
+- **the tree as published**: build → marker, qcow2 root-disk and umfb gates
+  all green
+  ([41325558439](https://github.com/lakitu12/linux-um-arm64-gki/actions/runs/41325558439),
+  2026-11-02). `linux-bionic` sha256 `8f5f9ee3…1acc9`, `stub_exe_bionic`
+  `83f51f7c…0781fc` — the stub has been byte-identical in every build since
+  2026-10-16, so a different stub hash means the stub sources changed;
 - both page sizes with the guest feature set
   ([39015377404](https://github.com/lakitu12/linux-um-arm64-gki/actions/runs/39015377404) 16 KB,
-  [39015169891](https://github.com/lakitu12/linux-um-arm64-gki/actions/runs/39015169891) 4 KB);
-- qcow2 root disk
-  ([39030792171](https://github.com/lakitu12/linux-um-arm64-gki/actions/runs/39030792171)).
+  [39015169891](https://github.com/lakitu12/linux-um-arm64-gki/actions/runs/39015169891) 4 KB).
 
 On a phone (through the app's loader): `/proc/config.gz` carries the whole
 feature set, `unshare -Urmpf` returns 0, and docker 26.1.5 runs `hello-world`
