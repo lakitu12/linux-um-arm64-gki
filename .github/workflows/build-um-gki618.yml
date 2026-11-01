@@ -1,0 +1,395 @@
+name: build-um-gki618
+
+# Build, assert and boot the GKI variant of the um-arm64 sandbox kernel.
+#
+# This repository is the kernel tree itself -- kernel/common android17-6.18 at
+# 6.18.32 with the port on top -- so there is nothing to apply here: the job
+# builds the checkout with the NDK, asserts that the port's hard requirements
+# and the guest feature set really made it into the config, then boots the
+# artifact on an arm64 runner with a marker gate. No device needed for the
+# smoke test.
+#
+# Every build merges the default guest feature set (docker / snap / flatpak,
+# the Android guest gates, the display sink -- README, "Guest feature set"),
+# and the assert step audits it symbol by symbol (ci/cfg-check.py).
+#
+# Runner note: this is a public repo, so GitHub-hosted runners -- including the
+# arm64 one the boot job uses -- are free. run_boot=false keeps a run
+# artifact-only when needed. NDK pinned to r28c -- the release this tree was
+# validated against (upstream used r27c; r28c enables a few extra warning
+# flags, and the tree is fixed up for them).
+
+on:
+  workflow_dispatch:
+    inputs:
+      extra_config:
+        description: "Extra kconfig fragments appended to the default guest feature set, space separated; paths relative to tools/um-arm64/ in the tree."
+        required: false
+        type: string
+        default: ""
+      pages4k:
+        description: "Build the 4 KB guest-page variant instead of the validated 16 KB default (fragment: config/page4k.config); artifacts get a -4k suffix."
+        required: false
+        type: boolean
+        default: false
+      vt:
+        description: "Build the VT variant a guest needs for a real X server (fragment: config/vt.config: CONFIG_EXPERT + CONFIG_VT, VT_CONSOLE off); artifacts get a -vt suffix and the UML console loses its tty devices, so gates report through /dev/kmsg."
+        required: false
+        type: boolean
+        default: false
+      virtiogpu:
+        description: "Add config/virtio-gpu.config (VIRTIO_UML + UML_PCI_OVER_VIRTIO + DRM + virtio_gpu + fbdev emulation) and run the virtio-gpu gate on the arm64 runner. The gate boots the kernel against ci/vugpu2d.py, a 2D-only vhost-user-gpu backend."
+        required: false
+        type: boolean
+        default: false
+      run_boot:
+        description: "Run the arm64 marker boot gate"
+        required: false
+        type: boolean
+        default: true
+
+env:
+  NDK_VER: "r28c"
+  # "" or "-4k", from the pages4k input.  The artifact names must match across
+  # the build and boot jobs, so the suffix is derived once, here.  Boolean
+  # inputs cannot be tested through the `inputs` context in `if:`; compare the
+  # string form instead (same reason the run_boot gate below does).
+  PAGE_SUFFIX: ${{ github.event.inputs.pages4k == 'true' && '-4k' || '' }}
+  # Same for the VT variant: a VT kernel is a separate artifact, never a
+  # replacement for the default one (it has no UML-console tty devices).
+  VT_SUFFIX: ${{ github.event.inputs.vt == 'true' && '-vt' || '' }}
+
+permissions:
+  contents: read
+
+concurrency:
+  # Variant-scoped: the 16 KB and 4 KB artifacts are independent, so only
+  # same-variant runs supersede each other.  The VT variant is part of the key
+  # for the same reason: its kernel is not a replacement for the default one.
+  group: um-gki618-${{ github.ref }}-${{ github.event.inputs.pages4k == 'true' && '4k' || '16k' }}${{ github.event.inputs.vt == 'true' && '-vt' || '' }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: Free disk
+        run: sudo rm -rf /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL || true
+
+      - name: Checkout the kernel tree
+        uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang llvm lld libelf-dev zlib1g-dev flex bison make file cpio
+        shell: bash
+
+      - name: Cache NDK
+        id: ndk-cache
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/android-ndk
+          key: ndk-${{ env.NDK_VER }}
+
+      - name: Download NDK
+        if: steps.ndk-cache.outputs.cache-hit != 'true'
+        run: |
+          # The plain zip, not sdkmanager. r28c is what this tree was
+          # validated against.
+          set -euo pipefail
+          curl -fL --retry 3 --retry-delay 5 \
+            "https://dl.google.com/android/repository/android-ndk-${NDK_VER}-linux.zip" \
+            -o /tmp/ndk.zip
+          unzip -q /tmp/ndk.zip -d /tmp/ndk-x
+          mkdir -p /home/runner/android-ndk
+          # the zip unpacks as android-ndk-rXX/, and build-bionic.sh expects
+          # $NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/clang
+          mv /tmp/ndk-x/android-ndk-${NDK_VER}/* /home/runner/android-ndk/
+          rm -rf /tmp/ndk.zip /tmp/ndk-x
+          test -x /home/runner/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/clang
+          # No pipe here on purpose: `| head -1` would race -o pipefail the
+          # same way the nm assert did (tool exits on EPIPE, pipeline fails).
+          /home/runner/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/clang --version
+        shell: bash
+
+      - name: Build bionic kernel
+        working-directory: tools/um-arm64
+        env:
+          NDK: /home/runner/android-ndk
+          TREE: ${{ github.workspace }}
+          ART: ${{ github.workspace }}/artifacts
+          O: ${{ runner.temp }}/um-gki618-build
+        run: |
+          # The default guest feature set, merged into every build (README,
+          # "Guest feature set"): docker's requirements ship in the port as
+          # config/docker.config; the rest are this tree's own fragments.
+          # build-bionic.sh resolves EXTRA_CONFIG relative to tools/um-arm64/,
+          # which is this step's working directory.
+          export EXTRA_CONFIG="config/docker.config config/docker-completions.config config/snap-flatpak.config config/android-guest.config config/umfb.config"
+          # 4 KB variant (pages4k=true): the port's default is 16 KB guest
+          # pages.  build-bionic.sh merges EXTRA_CONFIG before olddefconfig,
+          # so the fragment's dependencies resolve.
+          if [ "${{ github.event.inputs.pages4k }}" = "true" ]; then
+            export EXTRA_CONFIG="$EXTRA_CONFIG config/page4k.config"
+          fi
+          # VT variant (vt=true): what a guest needs before Xorg will bind to a
+          # virtual terminal.  Kept out of the default set on purpose --
+          # vty_init() takes major 4, so the UML console loses its tty devices
+          # (config/vt.config has the measured detail).
+          if [ "${{ github.event.inputs.vt }}" = "true" ]; then
+            export EXTRA_CONFIG="$EXTRA_CONFIG config/vt.config"
+          fi
+          # virtio-gpu rides on the PCI-over-virtio path: DRM only gets HAS_DMA
+          # through UML_DMA_EMULATION, and UML_PCI (selected by
+          # UML_PCI_OVER_VIRTIO) is what selects that.  Asking for CONFIG_DRM
+          # without it silently yields "# CONFIG_DRM is not set".
+          if [ "${{ github.event.inputs.virtiogpu }}" = "true" ]; then
+            export EXTRA_CONFIG="$EXTRA_CONFIG config/virtio-gpu.config"
+          fi
+          # extra_config appends to the defaults (last fragment wins a clash).
+          if [ -n "${{ inputs.extra_config }}" ]; then
+            export EXTRA_CONFIG="$EXTRA_CONFIG ${{ inputs.extra_config }}"
+          fi
+          echo "EXTRA_CONFIG=$EXTRA_CONFIG"
+          # No ccache on purpose.
+          bash harness/build-bionic.sh
+        shell: bash
+
+      - name: Assert the build came out the way the port needs it
+        run: |
+          set -euo pipefail
+          CFG="${{ runner.temp }}/um-gki618-build/.config"
+          test -f "$CFG"
+          # Config the port's fixed-up defconfig/harness must produce:
+          # The page size follows the variant: pages4k=true builds 4 KB guest
+          # pages, the validated default is 16 KB.
+          if [ "${{ github.event.inputs.pages4k }}" = "true" ]; then
+            PGSIZE=PAGE_SIZE_4KB
+          else
+            PGSIZE=PAGE_SIZE_16KB
+          fi
+          echo "expecting guest page size: $PGSIZE"
+          for k in STATIC_LINK UML_NET_VECTOR FRAME_WARN "$PGSIZE"; do
+            case "$k" in
+              FRAME_WARN) grep -E "^CONFIG_FRAME_WARN=8192$" "$CFG" ;;
+              *)          grep -E "^CONFIG_${k}=y$" "$CFG" ;;
+            esac
+            echo "config ok: $k"
+          done
+          # The guest feature set must really be in the config — a fragment
+          # drop fails here, not on a device.  The curated keys are the
+          # headline features; cfg-check.py then re-audits EVERY request line
+          # of every default fragment, so a renamed or newly dependency-broken
+          # symbol fails with its name in the log.
+          for k in USER_NS PID_NS OVERLAY_FS SQUASHFS SQUASHFS_XZ SQUASHFS_ZSTD \
+                   FUSE_FS VETH BRIDGE NF_TABLES NFT_COMPAT NETFILTER_XT_MARK \
+                   IP_NF_TARGET_MASQUERADE IP6_NF_TARGET_MASQUERADE \
+                   SECCOMP_FILTER KEYS POSIX_MQUEUE BPF_SYSCALL CGROUP_BPF \
+                   MEMCG PSI EXT4_FS_POSIX_ACL BLK_DEV_LOOP IPV6 \
+                   NET_SCHED NET_CLS_CGROUP NFT_FIB_INET \
+                   FTRACE SCHED_TRACER EVENT_TRACING \
+                   ANDROID_BINDER_IPC ANDROID_BINDERFS UML_FB FB; do
+            grep -E "^CONFIG_${k}=y$" "$CFG" >/dev/null \
+              || { echo "missing config: CONFIG_$k"; exit 1; }
+            echo "config ok: $k"
+          done
+          grep -F 'CONFIG_ANDROID_BINDER_DEVICES="binder,hwbinder,vndbinder"' "$CFG" >/dev/null \
+            || { echo "missing config: ANDROID_BINDER_DEVICES string"; exit 1; }
+          echo "config ok: ANDROID_BINDER_DEVICES"
+          # The VT variant is only useful if VT is really in, DUMMY_CONSOLE
+          # provides the con_driver tty0 needs, and VT_CONSOLE is really out:
+          # VT_CONSOLE routes printk into the VT write path, which has no
+          # backend console in UML and takes the boot log with it.
+          VGPU_FRAG=""
+          if [ "${{ github.event.inputs.virtiogpu }}" = "true" ]; then
+            for k in VIRTIO_UML UML_PCI_OVER_VIRTIO UML_PCI UML_DMA_EMULATION \
+                     HAS_DMA DRM DRM_VIRTIO_GPU DRM_FBDEV_EMULATION VIRTIO_PCI; do
+              grep -E "^CONFIG_${k}=y$" "$CFG" >/dev/null \
+                || { echo "missing config: CONFIG_$k (virtio-gpu variant)"; exit 1; }
+              echo "config ok: $k"
+            done
+            VGPU_FRAG="tools/um-arm64/config/virtio-gpu.config"
+          fi
+          VT_FRAG=""
+          if [ "${{ github.event.inputs.vt }}" = "true" ]; then
+            grep -E "^CONFIG_VT=y$" "$CFG"
+            grep -E "^CONFIG_DUMMY_CONSOLE=y$" "$CFG"
+            grep -E "^# CONFIG_VT_CONSOLE is not set$" "$CFG"
+            echo "config ok: VT variant (VT on, DUMMY_CONSOLE on, VT_CONSOLE off)"
+            VT_FRAG="tools/um-arm64/config/vt.config"
+          fi
+          python3 ci/cfg-check.py "$CFG" \
+            tools/um-arm64/config/docker.config \
+            tools/um-arm64/config/docker-completions.config \
+            tools/um-arm64/config/snap-flatpak.config \
+            tools/um-arm64/config/android-guest.config \
+            tools/um-arm64/config/umfb.config \
+            $VT_FRAG $VGPU_FRAG
+
+          # Symbols the late fixes/backports brought in must be in the image.
+          # Write the nm output to a file first, then grep the file: piping
+          # llvm-nm into `grep -q` exits grep at its first match, llvm-nm's
+          # next write hits EPIPE and exits 74, and under -o pipefail the
+          # pipeline reports 74 — a symbol that just matched reads as
+          # missing. One red run proved exactly that (nm=74 grep=0).
+          NM=/home/runner/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm
+          "$NM" artifacts/linux-bionic > nm-full.txt || { echo "llvm-nm failed (rc=$?)"; exit 1; }
+          echo "nm: $(wc -l < nm-full.txt) lines"
+          file artifacts/linux-bionic
+          for s in os_futex_wake elf_aux_min_sigstack elf_aux_hwcap2 apply_alternatives; do
+            grep -qE " $s$" nm-full.txt || {
+              echo "missing symbol: $s — near matches:"
+              grep -a "$s" nm-full.txt | head -8 || true
+              exit 1
+            }
+            echo "symbol ok: $s"
+          done
+        shell: bash
+
+      - name: Collect artifacts
+        run: |
+          set -euo pipefail
+          A="${{ github.workspace }}/artifacts"
+          test -f "$A/linux-bionic" || { echo "linux-bionic missing under $A"; exit 1; }
+          sha256sum "$A/linux-bionic" | tee "$A/SHA256SUMS"
+          [ -f "$A/stub_exe_bionic" ] && sha256sum "$A/stub_exe_bionic" | tee -a "$A/SHA256SUMS"
+          ls -la "$A"
+        shell: bash
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: um-gki618${{ env.PAGE_SUFFIX }}${{ env.VT_SUFFIX }}-${{ github.run_number }}
+          path: |
+            artifacts/linux-bionic
+            artifacts/stub_exe_bionic
+            artifacts/SHA256SUMS
+            artifacts/build-bionic-*.log
+          if-no-files-found: error
+
+      - name: Upload failure evidence (on failure)
+        # A red run must carry its own evidence: the kernel, nm dump, build
+        # log and .config, so no re-run is needed to diagnose it.
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: um-gki618-failure${{ env.PAGE_SUFFIX }}${{ env.VT_SUFFIX }}-${{ github.run_number }}
+          path: |
+            nm-full.txt
+            artifacts/linux-bionic
+            artifacts/stub_exe_bionic
+            artifacts/build-bionic-*.log
+            ${{ runner.temp }}/um-gki618-build/.config
+          if-no-files-found: warn
+
+  boot:
+    needs: build
+    # Boolean inputs cannot be tested via the `inputs` context in `if:`;
+    # compare the string form instead.
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.run_boot == 'true' }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - name: Checkout this repo (CI scripts + gate init)
+        uses: actions/checkout@v4
+
+      - name: Download the built kernel
+        uses: actions/download-artifact@v4
+        with:
+          name: um-gki618${{ env.PAGE_SUFFIX }}${{ env.VT_SUFFIX }}-${{ github.run_number }}
+          path: ci-artifacts
+
+      - name: Install gate tools
+        # The gates bake their fixtures with the runner's native gcc (cpio for
+        # the initramfs; e2fsprogs + qemu-img for the qcow2 root disk); don't
+        # assume any of them is in the base image.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc libc6-dev cpio e2fsprogs qemu-utils
+        shell: bash
+
+      - name: Marker boot gate
+        run: |
+          mkdir -p boot-out
+          bash ci/boot-gate.sh ci-artifacts/artifacts/linux-bionic boot-out | tee boot-out/summary.txt
+        shell: bash
+
+      - name: qcow2 root-disk gate
+        run: |
+          mkdir -p boot-out-qcow2
+          bash ci/qcow2-gate.sh ci-artifacts/artifacts/linux-bionic boot-out-qcow2 | tee boot-out-qcow2/summary.txt
+        shell: bash
+
+      - name: UM framebuffer gate
+        run: |
+          mkdir -p boot-out-umfb
+          bash ci/umfb-gate.sh ci-artifacts/artifacts/linux-bionic boot-out-umfb | tee boot-out-umfb/summary.txt
+        shell: bash
+
+      - name: Upload boot log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: um-gki618-boot${{ env.PAGE_SUFFIX }}${{ env.VT_SUFFIX }}-${{ github.run_number }}
+          path: |
+            boot-out/boot.log
+            boot-out/summary.txt
+            boot-out/verdict.txt
+          if-no-files-found: warn
+
+      - name: Upload qcow2 gate log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: um-gki618-qcow2-boot${{ env.PAGE_SUFFIX }}${{ env.VT_SUFFIX }}-${{ github.run_number }}
+          path: |
+            boot-out-qcow2/boot.log
+            boot-out-qcow2/summary.txt
+            boot-out-qcow2/verdict.txt
+          if-no-files-found: warn
+
+      - name: Upload umfb gate log
+        # fb.raw is the evidence the verdict was computed on (~257 KB): the
+        # sink header the kernel published plus the bytes the guest wrote,
+        # exactly what every viewer consumes.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: um-gki618-umfb-boot${{ env.PAGE_SUFFIX }}${{ env.VT_SUFFIX }}-${{ github.run_number }}
+          path: |
+            boot-out-umfb/boot.log
+            boot-out-umfb/summary.txt
+            boot-out-umfb/verdict.txt
+            boot-out-umfb/check.txt
+            boot-out-umfb/fb.raw
+          if-no-files-found: warn
+
+      - name: Virtio GPU gate
+        # Boots the same artifact against ci/vugpu2d.py (a 2D-only
+        # vhost-user-gpu backend) over virtio_uml's socket.  Evidence, not an
+        # exit status: driver bind line + probe markers in boot.log, a
+        # create/transfer/flush cycle in backend.log, and the painted pixels
+        # in the sink (ci/vg-sink-check.py).
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.virtiogpu == 'true' }}
+        run: |
+          mkdir -p boot-out-vgpu
+          bash ci/virtio-gpu-gate.sh ci-artifacts/artifacts/linux-bionic boot-out-vgpu | tee boot-out-vgpu/summary.txt
+        shell: bash
+
+      - name: Upload virtio-gpu gate evidence
+        # vg-sink.raw is the frame the backend published (~3 MB); backend.log
+        # is the other half of the verdict.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: um-gki618-vgpu-boot${{ env.PAGE_SUFFIX }}${{ env.VT_SUFFIX }}-${{ github.run_number }}
+          path: |
+            boot-out-vgpu/boot.log
+            boot-out-vgpu/summary.txt
+            boot-out-vgpu/verdict.txt
+            boot-out-vgpu/backend.log
+            boot-out-vgpu/vg-sink.raw
+          if-no-files-found: warn

@@ -1,0 +1,7 @@
+SPDX-License-Identifier: GPL-2.0-only
+
+This repository is the Linux kernel (kernel/common android17-6.18 at 6.18.32)
+with the arm64 UML port on top, plus the build and boot helpers under ci/,
+docs/ and tools/. It is GPL-2.0-only, as is the kernel it is based on.
+
+The arm64 UML port is by Oleksii Zakharov (github.com/zalexdev/linux-um-arm64).
