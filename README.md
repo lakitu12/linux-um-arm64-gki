@@ -112,14 +112,13 @@ surprising a device.
 The base is one commit so that this stays a rebase:
 
 ```sh
-git fetch https://android.googlesource.com/kernel/common android17-6.18
-git checkout -b next FETCH_HEAD
-# import the new tree as the new base (see the base commit message), then
-git rebase --onto next <old-base> main
+# 1. import the new drop as one base commit (recipe: docs/gki-notes.md)
+# 2. replay the port on top of it
+git rebase --onto gki-next <old-base> main
 ```
 
-Most commits only touch `arch/um`, `arch/arm64/um` and `tools/um-arm64` and
-replay clean. The ones that are known to need attention are the backports —
+Most of the commits only touch `arch/um`, `arch/arm64/um` and
+`tools/um-arm64` and replay clean. The ones that are known to need attention are the backports —
 6.18 predates the upstream fix they carry, so they are dropped once the new
 base has it — and the build fixes for warnings r28c turns on. Both groups are
 listed in [`docs/gki-notes.md`](docs/gki-notes.md).

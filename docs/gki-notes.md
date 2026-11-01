@@ -10,10 +10,24 @@ googlesource archive (md5 `f2eac9986f130c17849eb07fd880487c`, 2026-10-16). The
 archive has no history on purpose: kernel/common's is several gigabytes, and
 nothing in this tree needs it.
 
-To move to a newer drop, commit the new archive the same way on a branch and
-`git rebase --onto` the port on top of it. Keeping the base to one commit is
-what makes that a replay of 75 commits instead of a merge across two unrelated
-histories.
+To move to a newer drop, import the new archive the same way and rebase onto
+it. Keeping the base to one commit is what makes that a replay of 75 commits
+instead of a merge across two unrelated histories:
+
+```sh
+# start from an empty branch and let the archive fill it
+git checkout --orphan gki-next
+git rm -rqf .
+find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+curl -o /tmp/gki.tar.gz \
+  https://android.googlesource.com/kernel/common/+archive/android17-6.18.tar.gz
+tar xzf /tmp/gki.tar.gz
+git add -A
+git commit -m "base: android17-6.18 @ <version> -- the GKI tree this port is built on"
+
+# replay the port; resolve per commit, not per file
+git rebase --onto gki-next "$(git rev-list --max-parents=0 main)" main
+```
 
 ## The 75 commits, in groups
 
