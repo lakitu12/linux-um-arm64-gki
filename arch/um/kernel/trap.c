@@ -520,20 +520,32 @@ retry:
 	 * PTE still looks present, and the guest re-faults on the same store
 	 * forever (docs §12.46.11: ~2e5 faults/s, an app wedged for 600 s).
 	 *
-	 * The guard is narrow on purpose.  Dirty+writable+synced is the only
-	 * state that cannot make progress: the host mapping was installed
-	 * writable, so the fault is not the dirty-bit handshake.  A *clean*
-	 * writable PTE also faults on the first write (UML maps clean pages
-	 * read-only, that is how the dirty bit is emulated), but generic code
-	 * dirties it and the sync re-maps it -- measured, not assumed: with
-	 * pte_dirty() left out this fired 308 times in one 180 s run, all of
-	 * them clean pages, all of them self-healing.  Requiring that the PTE
-	 * has not changed as well keeps the counter meaning "a mapping was
-	 * lost" instead of "someone wrote a clean page".
+	 * "The fault had nothing to do" is the whole test: the PTE is present,
+	 * the sync layer already published it, and it came out of the fault
+	 * *byte for byte unchanged*.  Anything the generic path installs goes
+	 * through set_pte(), which sets NEEDSYNC itself, so an unchanged PTE is
+	 * proof that nothing was installed -- and a page that is present, synced
+	 * and still faulting is precisely a page whose host mapping is missing.
+	 *
+	 * Both access types need this.  A write to a clean page looks the same
+	 * from here, but generic code dirties it, the PTE changes, and the sync
+	 * re-maps it -- measured, not assumed: with pte_dirty() left out this
+	 * fired 308 times in one 180 s run, all clean pages, all self-healing
+	 * (§12.46.12.4b), which is why the write arm still asks for dirty and
+	 * the PTE check keeps the counter meaning "a mapping was lost" instead of
+	 * "someone wrote a clean page".
+	 *
+	 * The read arm exists because that dirty-bit handshake gave the guard a
+	 * blind spot: a clean page is mapped read-only on the host by design, so
+	 * if its mapping is lost, the fault that follows is a *read* (or an
+	 * instruction fetch), ACCESSED is already set, the PTE does not change,
+	 * and the write-only guard never fires -- a read fault would loop exactly
+	 * like the store used to (§12.46.16.5).
 	 */
-	if (is_user && pte_present(orig) && pte_write(orig) &&
-	    pte_dirty(orig) && !pte_needsync(orig) &&
-	    READ_ONCE(pte->pte) == orig.pte) {
+	if (is_user && pte_present(orig) && !pte_needsync(orig) &&
+	    READ_ONCE(pte->pte) == orig.pte &&
+	    (is_write ? (pte_write(orig) && pte_dirty(orig))
+		      : pte_read(orig))) {
 		um_pte_set_needsync(pte);
 		um_tlb_mark_sync(mm, address & PAGE_MASK,
 				 (address & PAGE_MASK) + PAGE_SIZE);
