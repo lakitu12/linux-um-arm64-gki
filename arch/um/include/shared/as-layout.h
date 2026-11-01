@@ -6,7 +6,14 @@
 #ifndef __START_H__
 #define __START_H__
 
+/* asm-offsets.c sets COMPILE_OFFSETS and pulls this file in through
+ * linux/crypto.h -> ... -> asm/mmu.h -> skas/mm_id.h, i.e. while the header
+ * below does not exist yet. Nothing generated here needs it: the UM_*
+ * constants only appear inside macros.
+ */
+#ifndef COMPILE_OFFSETS
 #include <generated/asm-offsets.h>
+#endif
 
 /*
  * Stolen from linux/const.h, which can't be directly included since
@@ -48,7 +55,7 @@
  * papered over: check_stub_sigstack() compares the two at boot and refuses
  * SECCOMP mode with a message naming both numbers.
  */
-#if defined(__aarch64__) && UM_KERN_PAGE_SIZE < 16384
+#if defined(__aarch64__) && defined(UM_KERN_PAGE_SIZE) && UM_KERN_PAGE_SIZE < 16384
 #define STUB_DATA_PAGES 4
 #else
 #define STUB_DATA_PAGES 2
