@@ -5,13 +5,15 @@ that runs as an ordinary aarch64 userspace process — in an Android app or an
 `adb shell` — on the 6.18 baseline that current phones ship.
 
 This is a kernel tree, not a patch set. The first commit is kernel/common
-`android17-6.18` at 6.18.32; the 75 commits on top are the port, so a clone
+`android17-6.18` at 6.18.32; the 95 commits on top are the port, so a clone
 builds as it is. The tree is the standard kernel for the uml-android sandbox
 (the bionic UML kernel binary and the stub that goes with it); the app side is
 a separate repository.
 
-Uniprocessor only — this baseline has no UML SMP. What adding it back would
-cost is in [`docs/smp.md`](docs/smp.md).
+SMP is on: the guest brings up one fewer CPU than its host (`ncpus=` overrides,
+`NR_CPUS=16` is the ceiling) and runs one CPU on a host that can only do ptrace.
+[`docs/smp.md`](docs/smp.md) has the backport, the numbers, and what it does not
+speed up.
 
 ## Build
 
@@ -59,6 +61,8 @@ page size at runtime and runs on the 16 KB build as well.
 - the arm64 UML port itself: the subarch, the stub, syscall interception, the
   signal-frame and FP/SIMD fixes found on hardware, loadable modules, bionic
   builds;
+- **SMP**, re-landed from the 6.19 series: up to `NR_CPUS=16` vCPUs,
+  `ncpus=`-controlled, `stub_slots=` for threads of one process;
 - **qcow2 root disks**: `ubd0=` takes a qcow2 image, read and write, refcounts
   and compressed descriptors on the read path;
 - **umfb**, a framebuffer whose changed tiles are mirrored into a host file or

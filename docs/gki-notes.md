@@ -11,7 +11,7 @@ archive has no history on purpose: kernel/common's is several gigabytes, and
 nothing in this tree needs it.
 
 To move to a newer drop, import the new archive the same way and rebase onto
-it. Keeping the base to one commit is what makes that a replay of 75 commits
+it. Keeping the base to one commit is what makes that a replay of 95 commits
 instead of a merge across two unrelated histories:
 
 ```sh
@@ -29,7 +29,7 @@ git commit -m "base: android17-6.18 @ <version> -- the GKI tree this port is bui
 git rebase --onto gki-next "$(git rev-list --max-parents=0 main)" main
 ```
 
-## The 75 commits, in groups
+## The 95 commits, in groups
 
 | group | what it is | on rebase |
 |---|---|---|
@@ -37,6 +37,7 @@ git rebase --onto gki-next "$(git rev-list --max-parents=0 main)" main
 | found on hardware | pointer authentication in the stub, FP/SIMD across signals in SECCOMP mode, `PTRS_PER_PTE` from `PAGE_SHIFT`, 16 KB pages | keep |
 | Android guest fixes | `hw_random` node name and mode (the `prng_seeder` boot race), top-down mmap and `mmap_rnd_bits` for Android init's `SetMmapRndBits` | keep; drop only if the base grows its own |
 | backports | `__access_ok_vsyscall` removal (×2), `CMSG_DATA` rvalue, `elf_aux.o` unconditional, `os_futex_wait()`/`os_futex_wake()` | **drop when the base has the upstream commit** — these conflict by construction, they carry a fix 6.18 predates |
+| SMP | the 6.19 SMP series re-landed by hand, plus the arm64 subarch half, the `ncpus` default, the ptrace clamp and the stub pool (`B0`–`B2`); the two clean-build fixes it exposed (`asm-offsets.h` from its own generator, `PM_SLEEP` tracepoint exports) | **drop the series when the base has 6.19's**; keep the subarch select, `rqspinlock.h`, the `ncpus`/ptrace clamp and the stub pool, which upstream does not have |
 | build fixes for r28c | `CONFIG_FRAME_WARN=8192`, `arch_ptrace()` locals, the `text-patching.h` overlay, no-port-I/O → no `HAS_IOPORT_MAP` | redo against the new base: these exist because the newer clang enables warnings the old one did not |
 | features | qcow2 ubd backend, `UML_HOST_TOP`, umfb + umview, virtio-gpu damage clips, VT ioctls on the stdio console, virtio-snd fragment | keep |
 

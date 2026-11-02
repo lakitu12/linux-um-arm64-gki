@@ -36,8 +36,9 @@ Variants, not part of the default set:
 
 ## Deliberately not here
 
-- `CPUSETS` and any SMP-dependent controller: this baseline is uniprocessor
-  (`docs/smp.md`); `docker info` reports its usual cpuset warning and runs.
+- `CPUSETS` and any SMP-dependent controller: the kernel has SMP now
+  (`docs/smp.md`), but the controller has not been through a docker run on a
+  device yet; `docker info` reports its usual cpuset warning and runs.
 - AppArmor: not wired into guest boot; snapd runs without confinement profiles.
   Adding an LSM means choosing a story for every guest.
 - Loadable modules: the kernel is built without module support; everything is

@@ -1,30 +1,67 @@
-# No SMP here
+# SMP
 
-This tree is uniprocessor, because the 6.18 GKI baseline has no UML SMP and
-bringing it back is a project of its own. The port's SMP work exists upstream
-and is deliberately not in this series.
+The guest boots more than one vCPU. `CONFIG_SMP=y` and `CONFIG_NR_CPUS=16` are
+in the default build (`tools/um-arm64/config/smp.config`, merged by
+`harness/build-bionic.sh`; `NO_SMP=1` opts out), and the count actually brought
+up is the `ncpus=` boot argument: one fewer than the host has by default,
+clamped to `NR_CPUS`. One binary therefore serves a four-core container and a
+sixteen-core phone. A host that can only do ptrace userspace runs one CPU and
+says so instead of refusing to boot:
 
-The five commits it would need, in addition to the upstream SMP series itself:
+    SMP is not supported with ptrace userspace; running on 1 CPU instead of the 7 requested
 
-- `um/arm64: enable SMP` (with `rqspinlock.h` and an `smp.config`)
-- `um: run on one CPU under ptrace instead of refusing to boot`
-- `um: default ncpus to one less than the host has`
-- `tools/um-arm64: add the SMP scaling benchmark`
-- `um: fix the uniprocessor build of the ptrace CPU clamp`
+`NR_CPUS` is a compile-time ceiling for static arrays and cpumasks, not a
+runtime count — raising it costs array size, not time.
 
-The upstream work they build on:
+## What it buys
 
-- Tiwei Bie, *[PATCH v2 00/10] um: Add SMP support* — RFC to v2 through
-  2025-08, merged for 6.19: 42 files, +827/−112, new `kernel/smp.c`,
-  `os-Linux/smp.c`, `shared/smp.h`, `linux/smp-internal.h`; it touches signal,
-  timer, tlb, trap, vdso and percpu.
-- the SMP fixes that landed after 6.19 (the 7.1 TLB sync race among them) have
-  to be evaluated with it.
+Four CPU-bound guests measured 3.19–3.76× their serial time on marble (eight
+cores, so seven vCPUs), and `/proc/stat` shows the busy jiffies on several CPUs.
 
-So a full backport is a mid-sized second effort: ten-plus upstream commits
-relocated onto this base, the five commits above, then build and hardware
-validation. Worth its own branch rather than a corner of this one.
+Threads of one guest process stay serialised unless the stub pool is opened with
+`stub_slots=N`; the pool is opt-in and defaults to 1. With `stub_slots=8` the
+same-process four-thread probe measures 3.25–4.02× against 0.93–1.09× with the
+pool off, on the same kernel, image and command line. The app domain is not
+cleared for it yet — it reaches `graphical.target` but trips an RCU stall dump —
+so the default stays 1.
 
-What it would buy a guest: more than one vCPU. Guest user code already runs at
-native speed on the host CPU; what SMP changes is how much of that the kernel
-lets a guest use at once.
+## What it does not buy
+
+- **Guest block I/O.** ubd completions arrive as SIGIO, which is
+  process-directed, so the host delivers them to the thread group leader —
+  CPU0. A parallel `docker build` therefore scales less than the compile phase
+  inside it; `harness/smpbench.sh` measures both, and the gap is that effect.
+- **Single-threaded guests.** A slot is a host thread and therefore a host
+  core, so spreading one guest thread over the pool measured 4.3× slower than
+  keeping it where it started; slots are sticky per task.
+
+## Where it came from
+
+The 6.18 GKI line has no UML SMP at all: `arch/um/Kconfig` pinned `NR_CPUS` to
+`range 1 1` and `arch/um/kernel/smp.c` did not exist. This tree re-lands the
+series that went into 6.19 by hand, squashed into one commit because it needed
+conflict resolution rather than a cherry-pick:
+
+    um: Do not disable kmalloc in initial_thread_cb()
+    um: Turn signals_* into thread-local variables
+    um: Define timers on a per-CPU basis
+    um: Determine sleep based on need_resched()
+    um: Add initial SMP support
+
+On top of it the tree carries what those patches assume: signals state per host
+thread, per-CPU POSIX timers with `SIGEV_THREAD_ID`, idle sleep on a signalfd so
+an IPI can carry data. Then the arm64 subarch half (select
+`UML_SUBARCH_SUPPORTS_SMP`, `arch/arm64/um/asm/rqspinlock.h` for the BPF
+rqspinlock, which would otherwise want the architected timer's event stream), the
+`ncpus` default with its ptrace clamp, the stub pool, and two build fixes a clean
+`O=` needed — `asm-offsets.h` reached from its own generator, and the
+`PM_SLEEP` tracepoint exports that had only been unconditional because UML
+always had suspend.
+
+## Checking a kernel
+
+CI asserts `CONFIG_SMP`, `CONFIG_NR_CPUS=16` and `UML_SUBARCH_SUPPORTS_SMP`, and
+the marker gate reads `UMARM_GKI618_CPUS=<n>` out of the guest: a host with two
+or more CPUs has to show two or more there. On a device, `nproc`,
+`/proc/cpuinfo` and `/sys/devices/system/cpu/online` are the same check, and
+`harness/smpbench.sh` produces the scaling numbers above.
