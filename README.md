@@ -5,7 +5,7 @@ that runs as an ordinary aarch64 userspace process — in an Android app or an
 `adb shell` — on the 6.18 baseline that current phones ship.
 
 This is a kernel tree, not a patch set. The first commit is kernel/common
-`android17-6.18` at 6.18.32; the 95 commits on top are the port, so a clone
+`android17-6.18` at 6.18.32; the port is 95 commits on top, so a clone
 builds as it is. The tree is the standard kernel for the uml-android sandbox
 (the bionic UML kernel binary and the stub that goes with it); the app side is
 a separate repository.
@@ -136,18 +136,23 @@ an arm64 runner:
 
 - **the tree as published**: build → marker, qcow2 root-disk and umfb gates
   all green
-  ([41325558439](https://github.com/lakitu12/linux-um-arm64-gki/actions/runs/41325558439),
-  2026-11-02). `linux-bionic` sha256 `8f5f9ee3…1acc9`, `stub_exe_bionic`
-  `83f51f7c…0781fc` — the stub has been byte-identical in every build since
-  2026-10-16, so a different stub hash means the stub sources changed;
+  ([41392909848](https://github.com/lakitu12/linux-um-arm64-gki/actions/runs/41392909848),
+  2026-11-02). The marker gate boots the artifact twice and reads the CPU count
+  back from the guest: plain (ptrace) clamped itself to 1 CPU of the runner's 4,
+  `seccomp=on` brought up 3. `linux-bionic` sha256 `212772ea…ae499`,
+  `stub_exe_bionic` `5ad0f1ee…cdfa7` — the stub carries the SMP stub pool now,
+  so its hash changed with that landing and is byte-identical across builds of
+  this tree; a different one means the stub sources changed;
 - both page sizes with the guest feature set
   ([39015377404](https://github.com/lakitu12/linux-um-arm64-gki/actions/runs/39015377404) 16 KB,
   [39015169891](https://github.com/lakitu12/linux-um-arm64-gki/actions/runs/39015169891) 4 KB).
+  Those are patch-stack runs from before this repository became the tree; a
+  4 KB build of the tree itself has not been re-run.
 
 On a phone (through the app's loader): `/proc/config.gz` carries the whole
-feature set, `unshare -Urmpf` returns 0, and docker 26.1.5 runs `hello-world`
-and publishes `nginx:alpine` on the guest's own loopback, `overlay2` on
-cgroup v2.
+feature set, `nproc` reports 7 vCPUs on marble's eight cores, `unshare -Urmpf`
+returns 0, and docker 26.1.5 runs `hello-world` and publishes `nginx:alpine` on
+the guest's own loopback, `overlay2` on cgroup v2.
 
 ## Credits & license
 

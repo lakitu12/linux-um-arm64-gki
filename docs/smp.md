@@ -4,8 +4,8 @@ The guest boots more than one vCPU. `CONFIG_SMP=y` and `CONFIG_NR_CPUS=16` are
 in the default build (`tools/um-arm64/config/smp.config`, merged by
 `harness/build-bionic.sh`; `NO_SMP=1` opts out), and the count actually brought
 up is the `ncpus=` boot argument: one fewer than the host has by default,
-clamped to `NR_CPUS`. One binary therefore serves a four-core container and a
-sixteen-core phone. A host that can only do ptrace userspace runs one CPU and
+clamped to `NR_CPUS`. One binary therefore covers any host up to sixteen
+cores. A host that can only do ptrace userspace runs one CPU and
 says so instead of refusing to boot:
 
     SMP is not supported with ptrace userspace; running on 1 CPU instead of the 7 requested
