@@ -61,7 +61,10 @@ always had suspend.
 ## Checking a kernel
 
 CI asserts `CONFIG_SMP`, `CONFIG_NR_CPUS=16` and `UML_SUBARCH_SUPPORTS_SMP`, and
-the marker gate reads `UMARM_GKI618_CPUS=<n>` out of the guest: a host with two
-or more CPUs has to show two or more there. On a device, `nproc`,
-`/proc/cpuinfo` and `/sys/devices/system/cpu/online` are the same check, and
-`harness/smpbench.sh` produces the scaling numbers above.
+the marker gate boots the artifact twice — plain, which is ptrace and must clamp
+to one CPU, and `seccomp=on`, which must bring up more than one on a multi-CPU
+host. It reads `UMARM_GKI618_CPUS=<n>` out of the guest and compares it with the
+mode the kernel printed, so neither a SECCOMP boot with one CPU nor a ptrace
+boot with several passes. On a device, `nproc`, `/proc/cpuinfo` and
+`/sys/devices/system/cpu/online` are the same check, and `harness/smpbench.sh`
+produces the scaling numbers above.

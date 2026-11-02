@@ -14,7 +14,15 @@
  * kernel inherited — the log then lost the marker entirely while the boot
  * itself was fine (run 39141339058).  printk keeps a working console
  * either way, so kmsg is the path that cannot depend on tty setup.
+ *
+ * Alongside the marker, the CPU count this process may run on: SMP is a
+ * build option until a boot proves the kernel brought the CPUs up, and
+ * boot-gate.sh reads this line rather than inferring it from the config.
+ * sched_getaffinity() rather than /proc: no mount is needed for it.
  */
+#define _GNU_SOURCE	/* cpu_set_t and sched_getaffinity() */
+#include <sched.h>
+#include <stdio.h>
 #include <time.h>
 #include <unistd.h>
 #include <sys/syscall.h>
@@ -22,12 +30,31 @@
 
 #include "gate-out.h"
 
+static long gate_online_cpus(void)
+{
+	cpu_set_t set;
+
+	CPU_ZERO(&set);
+	if (sched_getaffinity(0, sizeof(set), &set))
+		return -1;
+	return CPU_COUNT(&set);
+}
+
 int main(void)
 {
 	static const char msg[] = "UMARM_GKI618_BOOT_OK\n";
 	struct timespec ts = { .tv_sec = 0, .tv_nsec = 200 * 1000 * 1000 };
+	char line[64];
+	long cpus;
+	int n;
 
 	gate_out_init();
+	cpus = gate_online_cpus();
+	if (cpus > 0)
+		n = snprintf(line, sizeof(line), "UMARM_GKI618_CPUS=%ld\n", cpus);
+	else
+		n = snprintf(line, sizeof(line), "UMARM_GKI618_CPUS=unknown\n");
+	gate_emit(line, n);
 	gate_emit(msg, sizeof(msg) - 1);
 	nanosleep(&ts, NULL);
 	sync();

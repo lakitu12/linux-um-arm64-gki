@@ -172,13 +172,19 @@ jobs:
             PGSIZE=PAGE_SIZE_16KB
           fi
           echo "expecting guest page size: $PGSIZE"
-          for k in STATIC_LINK UML_NET_VECTOR FRAME_WARN "$PGSIZE"; do
+          for k in STATIC_LINK UML_NET_VECTOR FRAME_WARN "$PGSIZE" \
+                   SMP UML_SUBARCH_SUPPORTS_SMP; do
             case "$k" in
               FRAME_WARN) grep -E "^CONFIG_FRAME_WARN=8192$" "$CFG" ;;
               *)          grep -E "^CONFIG_${k}=y$" "$CFG" ;;
             esac
             echo "config ok: $k"
           done
+          # NR_CPUS is a ceiling, not a count: the runtime count is ncpus=,
+          # and the boot job's marker gate is where that one is checked.
+          grep -E "^CONFIG_NR_CPUS=16$" "$CFG" >/dev/null \
+            || { echo "missing config: CONFIG_NR_CPUS=16"; exit 1; }
+          echo "config ok: NR_CPUS=16"
           # The guest feature set must really be in the config — a fragment
           # drop fails here, not on a device.  The curated keys are the
           # headline features; cfg-check.py then re-audits EVERY request line
@@ -222,6 +228,7 @@ jobs:
             VT_FRAG="tools/um-arm64/config/vt.config"
           fi
           python3 ci/cfg-check.py "$CFG" \
+            tools/um-arm64/config/smp.config \
             tools/um-arm64/config/docker.config \
             tools/um-arm64/config/docker-completions.config \
             tools/um-arm64/config/snap-flatpak.config \
@@ -311,10 +318,21 @@ jobs:
           sudo apt-get install -y --no-install-recommends gcc libc6-dev cpio e2fsprogs qemu-utils
         shell: bash
 
-      - name: Marker boot gate
+      - name: Marker boot gate (ptrace)
         run: |
           mkdir -p boot-out
           bash ci/boot-gate.sh ci-artifacts/linux-bionic boot-out | tee boot-out/summary.txt
+        shell: bash
+
+      - name: Marker boot gate with SMP (seccomp=on)
+        # ptrace is the mode the kernel falls back to when nothing is asked
+        # for, and it clamps to one CPU by design; the SMP path is the SECCOMP
+        # one.  Boot the same artifact once more with the mode forced, so a
+        # host that cannot do seccomp fails here by name instead of quietly
+        # reading as a uniprocessor boot.
+        run: |
+          mkdir -p boot-out-smp
+          bash ci/boot-gate.sh ci-artifacts/linux-bionic boot-out-smp seccomp=on | tee boot-out-smp/summary.txt
         shell: bash
 
       - name: qcow2 root-disk gate
@@ -338,6 +356,9 @@ jobs:
             boot-out/boot.log
             boot-out/summary.txt
             boot-out/verdict.txt
+            boot-out-smp/boot.log
+            boot-out-smp/summary.txt
+            boot-out-smp/verdict.txt
           if-no-files-found: warn
 
       - name: Upload qcow2 gate log
