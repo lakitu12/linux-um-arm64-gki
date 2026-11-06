@@ -681,6 +681,56 @@ int os_sendmsg_fds(int fd, const void *buf, unsigned int len, const int *fds,
 	return err;
 }
 
+/*
+ * Receive one message and, if it carries descriptors, take ownership of them.
+ * The vhost-user socket is a SOCK_STREAM, so the caller must pass a buffer that
+ * holds a complete message: the descriptors are attached to whichever chunk
+ * arrives first.
+ */
+int os_recvmsg_fds(int fd, void *buf, unsigned int len, int *fds,
+		   unsigned int max_fds)
+{
+	struct iovec iov = {
+		.iov_base = buf,
+		.iov_len = len,
+	};
+	union {
+		char control[CMSG_SPACE(sizeof(*fds) * OS_SENDMSG_MAX_FDS)];
+		struct cmsghdr align;
+	} u;
+	struct msghdr msg = {
+		.msg_iov = &iov,
+		.msg_iovlen = 1,
+		.msg_control = u.control,
+		.msg_controllen = sizeof(u.control),
+	};
+	struct cmsghdr *cmsg;
+	unsigned int n = 0;
+	int err;
+
+	err = recvmsg(fd, &msg, 0);
+	if (err < 0)
+		return -errno;
+
+	for (cmsg = CMSG_FIRSTHDR(&msg); cmsg; cmsg = CMSG_NXTHDR(&msg, cmsg)) {
+		if (cmsg->cmsg_level != SOL_SOCKET ||
+		    cmsg->cmsg_type != SCM_RIGHTS)
+			continue;
+		while (CMSG_LEN(sizeof(int) * (n + 1)) <= cmsg->cmsg_len &&
+		       n < max_fds) {
+			memcpy(&fds[n], CMSG_DATA(cmsg) + sizeof(int) * n,
+			       sizeof(int));
+			n++;
+		}
+	}
+
+	/* Hand back how many were installed by leaving the rest cleared. */
+	for (; n < max_fds; n++)
+		fds[n] = -1;
+
+	return err;
+}
+
 int os_poll(unsigned int n, const int *fds)
 {
 	/* currently need 2 FDs at most so avoid dynamic allocation */

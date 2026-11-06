@@ -178,6 +178,8 @@ extern int os_falloc_zeroes(int fd, unsigned long long offset, int count);
 extern int os_eventfd(unsigned int initval, int flags);
 extern int os_sendmsg_fds(int fd, const void *buf, unsigned int len,
 			  const int *fds, unsigned int fds_num);
+extern int os_recvmsg_fds(int fd, void *buf, unsigned int len, int *fds,
+			  unsigned int max_fds);
 int os_poll(unsigned int n, const int *fds);
 void *os_mmap_rw_shared(int fd, size_t size);
 void *os_mremap_rw_shared(void *old_addr, size_t old_size, size_t new_size);
