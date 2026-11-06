@@ -14,13 +14,141 @@
 #include <kern.h>
 #include <kern_util.h>
 #include <mem_user.h>
+#include <mm_id.h>
 #include <os.h>
+
+#include <asm/umshm.h>
+
+#include <umshm.h>
 
 static int physmem_fd = -1;
 
 /* Changed during early boot */
 unsigned long high_physmem;
 EXPORT_SYMBOL(high_physmem);
+
+/*
+ * io_remap_pfn_range(), for the pfn-to-descriptor case described in
+ * asm/pgtable.h.
+ *
+ * The pages have no struct page -- they live in a host descriptor registered
+ * through umshm.c -- so the generic implementation cannot work: it would go
+ * through pfn_to_page().  Installing a host mapping here directly does not
+ * work either.  It looks fine until the first syscall returns: UML's page
+ * tables know nothing about the range, the sync walk at the syscall boundary
+ * finds no PTE, and the freshly installed mapping is dropped before the
+ * caller can touch it (measured: the first store after mmap() faulted at the
+ * address that had just been mapped).
+ *
+ * So this does what every other UML mapping does: publish guest PTEs and let
+ * the fault/sync path install the host side.  The first access faults, and
+ * phys_mapping() -- which consults umshm.c -- supplies the descriptor then.
+ */
+int io_remap_pfn_range(struct vm_area_struct *vma, unsigned long addr,
+		       unsigned long pfn, unsigned long size, pgprot_t prot)
+{
+	struct mm_struct *mm = vma->vm_mm;
+	unsigned long phys = pfn << PAGE_SHIFT;
+	unsigned long end = addr + size;
+	unsigned long a;
+
+	/* A hole here would fault later with no descriptor behind it, so refuse
+	 * the whole range up front instead of mapping most of it. */
+	for (a = phys; a < phys + size; a += PAGE_SIZE) {
+		unsigned long long off;
+
+		if (phys_mapping(a, &off) < 0) {
+			pr_info("uml_io_remap: no backing for phys 0x%lx (len 0x%lx)\n",
+				a, size);
+			return -EINVAL;
+		}
+	}
+
+	for (a = addr; a < end; a += PAGE_SIZE, phys += PAGE_SIZE) {
+		pgd_t *pgd = pgd_offset(mm, a);
+		p4d_t *p4d;
+		pud_t *pud;
+		pmd_t *pmd;
+		pte_t *pte;
+
+		p4d = p4d_alloc(mm, pgd, a);
+		if (!p4d)
+			return -ENOMEM;
+		pud = pud_alloc(mm, p4d, a);
+		if (!pud)
+			return -ENOMEM;
+		pmd = pmd_alloc(mm, pud, a);
+		if (!pmd)
+			return -ENOMEM;
+		pte = pte_alloc_map(mm, pmd, a);
+		if (!pte)
+			return -ENOMEM;
+		if (pte_present(*pte))
+			continue;
+		/* The physical address is the PTE payload on UML; set_pte() sets
+		 * NEEDSYNC, which is what makes the next sync publish it. */
+		set_pte(pte, __pte(phys | _PAGE_PRESENT | _PAGE_RW | _PAGE_USER |
+				   _PAGE_ACCESSED | _PAGE_DIRTY));
+	}
+
+	/*
+	 * Publish the first page (and the rest of the range) up front as well.
+	 * Without it the first access to every page takes the fault path, and
+	 * that path races the sync walk over the very PTE installed above
+	 * ("pte changed under the sync walk") for a ring buffer written by a
+	 * spinning client.  The sync walk sees these PTEs as already mapped and
+	 * leaves them alone, so the two agree from the start.
+	 */
+	{
+		unsigned long long fd_off;
+		int fd = phys_mapping(pfn << PAGE_SHIFT, &fd_off);
+		int w = !!(vma->vm_flags & VM_WRITE);
+
+		if (fd >= 0) {
+			int err;
+
+			/*
+			 * The host side has to land in the mm of the task that
+			 * owns this vma.  os_map_memory() maps the calling
+			 * context, and for an mmap() from a guest process that
+			 * context is the vCPU thread of the UML kernel, not the
+			 * guest process: the address stays occupied by whatever
+			 * the guest's own loader left there (a read-only slice of
+			 * the image) and the guest reads that instead of the
+			 * blob.  map() hands the mmap to the owning stub, the
+			 * same path every guest page fault takes.
+			 */
+			if (vma->vm_mm == &init_mm) {
+				err = os_map_memory((void *)addr, fd, fd_off,
+						    size, 1, w, 0);
+			} else {
+				int prot = 1 /* PROT_READ */ |
+					   (w ? 2 /* PROT_WRITE */ : 0);
+
+				err = map(&vma->vm_mm->context.id, addr, size,
+					  prot, fd, fd_off);
+			}
+
+			if (err)
+				return err;
+		}
+	}
+
+	return 0;
+}
+
+/* Called from the driver that mapped a non-RAM range through
+ * io_remap_pfn_range(), when its vma is torn down.  os_unmap_memory() is the
+ * same primitive the tlb code uses to drop a mapping (kern_unmap()). */
+void uml_unmap_memory_range(unsigned long start, unsigned long len)
+{
+	int err = os_unmap_memory((void *)start, len);
+
+	if (err)
+		printk(KERN_WARNING "unmap of host range 0x%lx+0x%lx failed, err = %d\n",
+		       start, len, err);
+}
+EXPORT_SYMBOL_GPL(uml_unmap_memory_range);
 
 void map_memory(unsigned long virt, unsigned long phys, unsigned long len,
 		int r, int w, int x)
@@ -100,6 +228,18 @@ void __init setup_physmem(unsigned long start, unsigned long reserve_end,
 int phys_mapping(unsigned long phys, unsigned long long *offset_out)
 {
 	int fd = -1;
+	unsigned long off;
+
+	/*
+	 * Backend-registered descriptors come first: the virtio-gpu host-visible
+	 * window is carved out of guest physical memory that already has an
+	 * owner, and the blob that replaces a piece of it must win.
+	 */
+	fd = umshm_lookup(phys, &off);
+	if (fd >= 0) {
+		*offset_out = off;
+		return fd;
+	}
 
 	if (phys < physmem_size) {
 		fd = physmem_fd;

@@ -11,6 +11,18 @@
 #include <asm/page.h>
 #include <linux/mm_types.h>
 
+/*
+ * Drivers that mmap a physical range call io_remap_pfn_range(), whose generic
+ * implementation (include/linux/mm.h) turns the pfn into a vmemmap page.  On
+ * UML the interesting pfns are host descriptors registered at runtime
+ * (arch/um/kernel/umshm.c) and have no struct page: the mapping has to come
+ * from phys_mapping() + os_map_memory(), the same path a guest page fault
+ * takes.  Defined in arch/um/kernel/physmem.c.
+ */
+int io_remap_pfn_range(struct vm_area_struct *vma, unsigned long addr,
+		       unsigned long pfn, unsigned long size, pgprot_t prot);
+#define io_remap_pfn_range io_remap_pfn_range
+
 #define _PAGE_PRESENT	0x001
 #define _PAGE_NEEDSYNC	0x002
 #define _PAGE_RW	0x020
