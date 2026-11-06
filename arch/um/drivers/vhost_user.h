@@ -57,6 +57,16 @@ enum vhost_user_request {
 	VHOST_USER_GET_CONFIG = 24,
 	VHOST_USER_SET_CONFIG = 25,
 	VHOST_USER_VRING_KICK = 35,
+
+	/*
+	 * Not part of the protocol.  UML has no PCI BAR through which a virtio
+	 * device could hand the guest a descriptor, and a "host-visible" blob is
+	 * exactly that: a host fd the guest has to map.  virtio-uml carries the
+	 * request and the reply carries the fd in SCM_RIGHTS.
+	 *   request:  payload.integer = virtio-gpu resource id
+	 *   reply:    one descriptor, no payload
+	 */
+	VHOST_USER_UM_BLOB_FD = 100,
 };
 
 enum vhost_user_slave_request {

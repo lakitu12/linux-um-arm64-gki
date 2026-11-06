@@ -30,6 +30,7 @@
 #include <linux/time-internal.h>
 #include <linux/virtio-uml.h>
 #include <shared/as-layout.h>
+#include <shared/mem_user.h>
 #include <irq_kern.h>
 #include <init.h>
 #include <os.h>
@@ -316,6 +317,54 @@ static int vhost_user_get_features(struct virtio_uml_device *vu_dev,
 	if (rc)
 		return rc;
 	return vhost_user_recv_u64(vu_dev, features);
+}
+
+/*
+ * One host descriptor per host-visible blob, requested by resource id.  The
+ * reply body is empty and the descriptor rides in SCM_RIGHTS, so this is the
+ * one place that has to read a message with recvmsg() instead of read().
+ */
+static int vhost_user_recv_fd(struct virtio_uml_device *vu_dev, int *fd)
+{
+	struct vhost_user_msg msg;
+	int fds[1];
+	int rc;
+
+	rc = os_recvmsg_fds(vu_dev->sock, &msg, sizeof(msg), fds, 1);
+	if (rc < 0)
+		return rc;
+	if (rc < sizeof(msg.header))
+		return -EPROTO;
+	if (msg.header.flags != (VHOST_USER_FLAG_REPLY | VHOST_USER_VERSION))
+		return -EPROTO;
+	if (fds[0] < 0)
+		return -ENOENT;
+
+	*fd = fds[0];
+	return 0;
+}
+
+static int vhost_user_um_get_blob_fd(struct virtio_uml_device *vu_dev,
+				     u32 res_id, int *fd)
+{
+	struct vhost_user_msg msg = {
+		.header.request = VHOST_USER_UM_BLOB_FD,
+		.header.size = sizeof(u32),
+	};
+	unsigned long flags;
+	int rc;
+
+	memcpy(&msg.payload.integer, &res_id, sizeof(res_id));
+
+	rc = vhost_user_send(vu_dev, true, &msg, NULL, 0);
+	if (rc)
+		return rc;
+
+	raw_spin_lock_irqsave(&vu_dev->sock_lock, flags);
+	rc = vhost_user_recv_fd(vu_dev, fd);
+	raw_spin_unlock_irqrestore(&vu_dev->sock_lock, flags);
+
+	return rc;
 }
 
 static int vhost_user_set_features(struct virtio_uml_device *vu_dev,
@@ -1111,6 +1160,40 @@ static const char *vu_bus_name(struct virtio_device *vdev)
 	return vu_dev->pdev->name;
 }
 
+int virtio_uml_get_blob_fd(struct virtio_device *vdev, u32 res_id, int *fd)
+{
+	struct virtio_uml_device *vu_dev = to_virtio_uml_device(vdev);
+
+	return vhost_user_um_get_blob_fd(vu_dev, res_id, fd);
+}
+EXPORT_SYMBOL_GPL(virtio_uml_get_blob_fd);
+
+/*
+ * virtio-gpu asks for its host-visible window through VIRTIO_GPU_SHM_ID_HOST_VISIBLE
+ * (1); without one it reports no host-visible memory and venus gives up during
+ * device enumeration.  UML has no transport register to answer from, so the
+ * window is whatever iomem= handed us under the name "umshm": a range of guest
+ * physical memory whose backing is decided at fault time by phys_mapping()
+ * (arch/um/kernel/umshm.c), which is also where a backend swaps in a blob's
+ * descriptor.
+ */
+static bool vu_get_shm_region(struct virtio_device *vdev,
+			      struct virtio_shm_region *region, u8 id)
+{
+	unsigned long len, virt;
+
+	if (id != 1)
+		return false;
+
+	virt = find_iomem("umshm", &len);
+	if (!virt || !len)
+		return false;
+
+	region->addr = __pa(virt);
+	region->len = len;
+	return true;
+}
+
 static const struct virtio_config_ops virtio_uml_config_ops = {
 	.get = vu_get,
 	.set = vu_set,
@@ -1122,6 +1205,7 @@ static const struct virtio_config_ops virtio_uml_config_ops = {
 	.get_features = vu_get_features,
 	.finalize_features = vu_finalize_features,
 	.bus_name = vu_bus_name,
+	.get_shm_region = vu_get_shm_region,
 };
 
 static void virtio_uml_release_dev(struct device *d)
