@@ -28,6 +28,10 @@
 
 #include "virtgpu_drv.h"
 
+#if IS_ENABLED(CONFIG_UML)
+#include <asm/umshm.h>
+#endif
+
 static int virtio_gpu_virglrenderer_workaround = 1;
 module_param_named(virglhack, virtio_gpu_virglrenderer_workaround, int, 0400);
 
@@ -70,12 +74,22 @@ void virtio_gpu_cleanup_object(struct virtio_gpu_object *bo)
 		drm_gem_shmem_free(&bo->base);
 	} else if (virtio_gpu_is_vram(bo)) {
 		struct virtio_gpu_object_vram *vram = to_virtio_gpu_vram(bo);
+		bool mapped = false;
 
 		spin_lock(&vgdev->host_visible_lock);
-		if (drm_mm_node_allocated(&vram->vram_node))
+		if (drm_mm_node_allocated(&vram->vram_node)) {
+			mapped = true;
 			drm_mm_remove_node(&vram->vram_node);
-
+		}
 		spin_unlock(&vgdev->host_visible_lock);
+
+#if IS_ENABLED(CONFIG_UML)
+		/* Outside the lock: dropping the registration closes the host
+		 * descriptor, which sleeps. */
+		if (mapped && vram->map_state == STATE_OK)
+			uml_virtio_gpu_blob_unmap(vgdev->host_visible_region.addr +
+						  vram->blob_offset);
+#endif
 
 		drm_gem_free_mmap_offset(&vram->base.base.base);
 		drm_gem_object_release(&vram->base.base.base);

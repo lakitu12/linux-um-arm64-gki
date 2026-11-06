@@ -111,6 +111,10 @@ struct virtio_gpu_object_vram {
 	uint32_t map_state;
 	uint32_t map_info;
 	struct drm_mm_node vram_node;
+	/* Offset of vram_node inside the host-visible window, kept because the
+	 * UML backend has to be told where in guest physical memory this blob
+	 * ended up (see asm/umshm.h). */
+	uint64_t blob_offset;
 };
 
 #define to_virtio_gpu_shmem(virtio_gpu_object) \

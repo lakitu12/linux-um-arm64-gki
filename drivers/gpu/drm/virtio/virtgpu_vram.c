@@ -3,6 +3,10 @@
 
 #include <linux/dma-mapping.h>
 
+#if IS_ENABLED(CONFIG_UML)
+#include <asm/umshm.h>
+#endif
+
 static void virtio_gpu_vram_free(struct drm_gem_object *obj)
 {
 	struct virtio_gpu_object *bo = gem_to_virtio_gpu_obj(obj);
@@ -24,9 +28,22 @@ static void virtio_gpu_vram_free(struct drm_gem_object *obj)
 	}
 }
 
+static void virtio_gpu_vram_vm_close(struct vm_area_struct *vma)
+{
+#if IS_ENABLED(CONFIG_UML)
+	/*
+	 * The map installed by io_remap_pfn_range() below is a host mapping that
+	 * the guest's page tables know nothing about, so the generic teardown
+	 * cannot drop it; undo it here, while the range is still known.
+	 */
+	uml_unmap_memory_range(vma->vm_start, vma->vm_end - vma->vm_start);
+#endif
+	drm_gem_vm_close(vma);
+}
+
 static const struct vm_operations_struct virtio_gpu_vram_vm_ops = {
 	.open = drm_gem_vm_open,
-	.close = drm_gem_vm_close,
+	.close = virtio_gpu_vram_vm_close,
 };
 
 static int virtio_gpu_vram_mmap(struct drm_gem_object *obj,
@@ -169,6 +186,7 @@ static int virtio_gpu_vram_map(struct virtio_gpu_object *bo)
 	virtio_gpu_array_add_obj(objs, &bo->base.base);
 	/*TODO: Add an error checking helper function in drm_mm.h */
 	offset = vram->vram_node.start - vgdev->host_visible_region.addr;
+	vram->blob_offset = offset;
 
 	ret = virtio_gpu_cmd_map(vgdev, objs, offset);
 	if (ret) {

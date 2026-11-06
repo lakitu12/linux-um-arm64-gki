@@ -34,6 +34,10 @@
 #include <drm/drm_edid.h>
 
 #include "virtgpu_drv.h"
+
+#if IS_ENABLED(CONFIG_UML)
+#include <asm/umshm.h>
+#endif
 #include "virtgpu_trace.h"
 
 #define MAX_INLINE_CMD_SIZE   96
@@ -1371,6 +1375,7 @@ static void virtio_gpu_cmd_resource_map_cb(struct virtio_gpu_device *vgdev,
 		(struct virtio_gpu_resp_map_info *)vbuf->resp_buf;
 	struct virtio_gpu_object_vram *vram = to_virtio_gpu_vram(bo);
 	uint32_t resp_type = le32_to_cpu(resp->hdr.type);
+	int ret = 0;
 
 	spin_lock(&vgdev->host_visible_lock);
 
@@ -1382,6 +1387,32 @@ static void virtio_gpu_cmd_resource_map_cb(struct virtio_gpu_device *vgdev,
 	}
 
 	spin_unlock(&vgdev->host_visible_lock);
+
+#if IS_ENABLED(CONFIG_UML)
+	/*
+	 * The blob now has a home in the host-visible window and the backend has
+	 * published the descriptor behind it.  Teaching the host side about the
+	 * pair is what makes the guest's mmap of this blob a mapping of host GPU
+	 * memory rather than a hole; opening the descriptor sleeps, so it cannot
+	 * happen under host_visible_lock.  A failure here has to fail the map:
+	 * the guest would otherwise fault on pages nobody ever backed.
+	 */
+	if (vram->map_state == STATE_OK) {
+		ret = uml_virtio_gpu_blob_map(vgdev->vdev,
+					      vgdev->host_visible_region.addr +
+					      vram->blob_offset,
+					      bo->base.base.size,
+					      bo->hw_res_handle);
+		if (ret) {
+			DRM_ERROR("blob %u: host memory registration failed: %d\n",
+				  bo->hw_res_handle, ret);
+			spin_lock(&vgdev->host_visible_lock);
+			vram->map_state = STATE_ERR;
+			spin_unlock(&vgdev->host_visible_lock);
+		}
+	}
+#endif
+
 	wake_up_all(&vgdev->resp_wq);
 }
 
