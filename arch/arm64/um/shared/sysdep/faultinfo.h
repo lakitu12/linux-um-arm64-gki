@@ -10,10 +10,10 @@
  * esr_context record inside mcontext.__reserved[]; see os-Linux/mcontext.c.
  *
  * EC 0x20/0x21 are instruction aborts (from a lower EL / from the same EL),
- * EC 0x24/0x25 are data aborts. For a data abort, WnR (bit 6) says whether the
- * access was a write. This is the arm64 equivalent of x86's page-fault error
- * code bit 1, and it is what makes copy-on-write distinguishable from a plain
- * read fault.
+ * EC 0x24/0x25 are data aborts. WnR (bit 6) identifies a write only when
+ * CM (bit 8) is clear: EL0 cache maintenance checks read permission, even
+ * when its abort sets WnR. Ordinary writes must still be distinguished
+ * from reads so that copy-on-write works.
  */
 #define UM_ESR_EC_SHIFT		26
 #define UM_ESR_EC_MASK		0x3f
@@ -23,6 +23,7 @@
 #define UM_ESR_EC_DABT_LOW	0x24
 #define UM_ESR_EC_DABT_CUR	0x25
 #define UM_ESR_WNR		(1UL << 6)
+#define UM_ESR_CM		(1UL << 8)
 
 struct faultinfo {
 	int is_write;

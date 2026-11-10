@@ -63,7 +63,8 @@ static inline unsigned long um_mc_find_esr(mcontext_t *mc)
 
 /*
  * arm64 puts the faulting address directly in mcontext_t, so unlike x86 there
- * is nothing to dig out of a gregs[] array. The write flag comes from ESR.WnR.
+ * is nothing to dig out of a gregs[] array. As on native arm64, a data abort
+ * is a write only if ESR.WnR is set and ESR.CM is clear.
  */
 #define GET_FAULTINFO_FROM_MC(fi, mc)					\
 	do {								\
@@ -72,6 +73,7 @@ static inline unsigned long um_mc_find_esr(mcontext_t *mc)
 		(fi).addr = (unsigned long)(mc)->fault_address;		\
 		(fi).esr = (unsigned int)__esr;				\
 		(fi).is_write = !!(__esr & UM_ESR_WNR) &&		\
+			!(__esr & UM_ESR_CM) &&				\
 			(UM_ESR_EC(__esr) == UM_ESR_EC_DABT_LOW ||	\
 			 UM_ESR_EC(__esr) == UM_ESR_EC_DABT_CUR);	\
 	} while (0)
