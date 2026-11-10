@@ -197,6 +197,32 @@ static inline void emit_kcfi(u32 hash, struct jit_ctx *ctx)
 static inline void emit_addr_mov_i64(const int reg, const u64 val,
 				     struct jit_ctx *ctx)
 {
+#ifdef CONFIG_UML
+	/*
+	 * The arm64 sequence below exploits a property of its kernel address
+	 * space: everything above bit 47 is 1, so MOVN can pre-fill the high
+	 * half and two movk cover the rest.  A UML kernel does not live there
+	 * -- its text is a host mapping starting at 0x60000000 and the JIT's
+	 * own image is somewhere else again -- so the high half must be zero.
+	 * Using the arm64 sequence made every helper and subprogram call branch
+	 * to 0xffffffff_60xxxxxx and the first program (netd's cgroupsock
+	 * filter) took a fault in kernel mode.
+	 *
+	 * What follows is deliberately *not* value-driven, unlike
+	 * emit_a64_mov_i64().  Its length has to be the same whatever the
+	 * value, because the values seen while sizing the image are
+	 * placeholders: a subprogram called with BPF_PSEUDO_CALL has a NULL
+	 * target until the last pass, and a BPF_PSEUDO_FUNC immediate holds a
+	 * stand-in until then too.  A shorter encoding for the placeholder
+	 * makes the size estimate come out under, and the last pass then
+	 * writes past the end of the image.  Four instructions cover any
+	 * 64-bit value, so always emit four.
+	 */
+	emit(A64_MOVZ(1, reg, val & 0xffff, 0), ctx);
+	emit(A64_MOVK(1, reg, (val >> 16) & 0xffff, 16), ctx);
+	emit(A64_MOVK(1, reg, (val >> 32) & 0xffff, 32), ctx);
+	emit(A64_MOVK(1, reg, (val >> 48) & 0xffff, 48), ctx);
+#else
 	u64 tmp = val;
 	int shift = 0;
 
@@ -206,6 +232,7 @@ static inline void emit_addr_mov_i64(const int reg, const u64 val,
 		shift += 16;
 		emit(A64_MOVK(1, reg, tmp & 0xffff, shift), ctx);
 	}
+#endif
 }
 
 static bool should_emit_indirect_call(long target, const struct jit_ctx *ctx)
@@ -1094,6 +1121,22 @@ static void build_epilogue(struct jit_ctx *ctx, bool was_classic)
 #define DONT_CLEAR 5 /* Unused ARM64 register from BPF's POV */
 
 bool ex_handler_bpf(const struct exception_table_entry *ex,
+		    struct pt_regs *regs);
+
+#ifdef CONFIG_UML
+/*
+ * UML guests have no exception table of their own for JITed code: a faulting
+ * BPF probe-memory access shows up as a SIGSEGV in the stub process, not as a
+ * fixable extable entry.  Report "not handled" so the generic path runs and the
+ * failure is visible instead of silently diverted.
+ */
+bool ex_handler_bpf(const struct exception_table_entry *ex,
+		    struct pt_regs *regs)
+{
+	return false;
+}
+#else
+bool ex_handler_bpf(const struct exception_table_entry *ex,
 		    struct pt_regs *regs)
 {
 	int dst_reg = FIELD_GET(BPF_FIXUP_REG_MASK, ex->fixup);
@@ -1115,6 +1158,7 @@ bool ex_handler_bpf(const struct exception_table_entry *ex,
 
 	return true;
 }
+#endif /* CONFIG_UML */
 
 /* For accesses to BTF pointers, add an entry to the exception table */
 static int add_exception_handler(const struct bpf_insn *insn,
@@ -1193,7 +1237,12 @@ static int add_exception_handler(const struct bpf_insn *insn,
 			      FIELD_PREP(BPF_FIXUP_ARENA_REG_MASK, arena_reg);
 	}
 
+#ifndef CONFIG_UML
+	/* UML's exception_table_entry has no arm64 "type" field: it keeps the
+	 * classic (insn, fixup) pair only.  The entry is never consumed by
+	 * ex_handler_bpf() on UML anyway (see that function). */
 	ex->type = EX_TYPE_BPF;
+#endif
 
 	ctx->exentry_idx++;
 	return 0;
@@ -2996,7 +3045,8 @@ int bpf_arch_text_poke(void *ip, enum bpf_text_poke_type poke_type,
 		if (set_memory_rw(PAGE_MASK & ((uintptr_t)&plt->target), 1))
 			return -EFAULT;
 		WRITE_ONCE(plt->target, plt_target);
-		set_memory_ro(PAGE_MASK & ((uintptr_t)&plt->target), 1);
+		if (set_memory_ro(PAGE_MASK & ((uintptr_t)&plt->target), 1))
+			return -EFAULT;
 		/* since plt target points to either the new trampoline
 		 * or dummy_tramp, even if another CPU reads the old plt
 		 * target value before fetching the bl instruction to plt,
