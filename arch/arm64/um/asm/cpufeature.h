@@ -25,9 +25,73 @@
 
 #define ARM64_WORKAROUND_843419		0
 
+/*
+ * Capabilities the reused arm64 code consults.  The BPF JIT is the other big
+ * consumer besides module-plts.c: it batches atomics when ARM64_HAS_LSE_ATOMICS
+ * is set, uses the virt-host-extn variant of some sequences, and emits the SB
+ * (speculation barrier) instruction when ARM64_HAS_SB is present.  A UML guest
+ * runs at EL0 and cannot probe any of this, so "no" is both the honest answer
+ * and the one that keeps generated code on the plain instruction subset.
+ */
+enum {
+	ARM64_HAS_VIRT_HOST_EXTN = 0,
+	ARM64_HAS_LSE_ATOMICS,
+	ARM64_HAS_SB,
+};
+
 static inline bool cpus_have_final_cap(int num)
 {
 	return false;
 }
+
+static inline bool cpus_have_cap(int num)
+{
+	return false;
+}
+
+/* No alternatives patching in UML: every capability answer is the compiled one. */
+static inline bool alternative_has_cap_likely(int cap)
+{
+	return false;
+}
+
+static inline bool alternative_has_cap_unlikely(int cap)
+{
+	return false;
+}
+
+/* Spectre: a UML guest has no firmware to query and no EL1 code to protect, and
+ * the JIT only asks so it can pick a mitigation sequence.  Report "vulnerable"
+ * so no mitigation opcodes are emitted. */
+enum mitigation_state {
+	SPECTRE_UNAFFECTED,
+	SPECTRE_MITIGATED,
+	SPECTRE_VULNERABLE,
+};
+
+#define SCOPE_LOCAL_CPU	0
+#define SCOPE_SYSTEM	1
+
+static inline enum mitigation_state arm64_get_spectre_v2_state(void)
+{
+	return SPECTRE_VULNERABLE;
+}
+
+static inline bool is_spectre_bhb_fw_mitigated(void)
+{
+	return false;
+}
+
+static inline u8 get_spectre_bhb_loop_value(void)
+{
+	return 0;
+}
+
+static inline bool supports_clearbhb(int scope)
+{
+	return false;
+}
+
+extern bool __nospectre_bhb;
 
 #endif /* __UM_ARM64_CPUFEATURE_H */

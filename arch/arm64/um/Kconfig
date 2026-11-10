@@ -2,6 +2,14 @@
 
 config UML_ARM64
 	def_bool y
+	#
+	# eBPF JIT.  The generated code is ordinary aarch64 and the UML kernel
+	# itself runs natively on the host CPU, so a JITed program is executable
+	# here just like any other kernel text.  arch/arm64/net/bpf_jit_comp.o is
+	# compiled into the subarch (see Makefile) and the insn encoder it needs
+	# is already in the tree.
+	#
+	select HAVE_EBPF_JIT
 	select ARCH_SUPPORTS_ATOMIC_RMW
 	#
 	# SMP. The subarch pieces it needs are already correct rather than

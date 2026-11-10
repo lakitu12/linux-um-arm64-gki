@@ -50,6 +50,10 @@ void *text_poke(void *addr, const void *opcode, size_t len);
 void *text_poke_copy(void *addr, const void *opcode, size_t len);
 void smp_text_poke_sync_each_cpu(void);
 
+/* include/linux/text-patching.h only supplies its memcpy() fallback while this
+ * macro is undefined; UML provides a real text_poke_copy in um_arch.c. */
+#define text_poke_copy text_poke_copy
+
 /*
  * With CONFIG_SMP, um_arch.c also defines these two no-op hooks (they exist
  * for x86's module alternatives; a UML guest has no ALTERNATIVE sequences to

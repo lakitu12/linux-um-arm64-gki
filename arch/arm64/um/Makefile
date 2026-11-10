@@ -42,3 +42,18 @@ UNPROFILE_OBJS := stub_segv.o
 CFLAGS_stub_segv.o := $(CFLAGS_NO_HARDENING)
 
 include $(srctree)/arch/um/scripts/Makefile.rules
+
+# eBPF JIT: the arm64 backend is pure instruction encoding (arch/arm64/lib/insn.o
+# already supplies aarch64_insn_*), so UML reuses it verbatim instead of
+# carrying a copy.  The generated code runs natively on the host CPU, same as
+# the rest of the UML kernel image.
+# The instruction encoder is shared with module-plts.c (insn.o under
+# CONFIG_MODULES), but the JIT needs it on its own when modules are off.
+subarch-$(CONFIG_BPF_JIT) += ../net/bpf_jit_comp.o ../lib/insn.o
+obj-$(CONFIG_BPF_JIT) += set_memory.o bpf_support.o patching.o
+
+# Neither file needs a copy of <asm/insn.h>, <asm/insn-def.h>, <asm/gpr-num.h>
+# or <asm/asm-extable.h>: the subarch directory is searched first, the parent's
+# arch/arm64/include comes right after it (arch/um/Makefile adds it for
+# $(HOST_DIR)), and a header that only exists in the parent's tree resolves
+# there. So the encoder stays a single file that follows arch/arm64.

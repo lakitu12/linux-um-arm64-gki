@@ -43,3 +43,33 @@ void *aarch64_insn_copy(void *dst, void *src, size_t len)
 
 	return dst;
 }
+
+/*
+ * The other three entry points the BPF JIT needs.  Kernel text is ordinary
+ * writable memory here (see the comment above), so a store plus the same
+ * EL0-legal cache maintenance is the whole implementation.
+ */
+int aarch64_insn_read(void *addr, u32 *insnp)
+{
+	*insnp = READ_ONCE(*(u32 *)addr);
+	return 0;
+}
+
+int aarch64_insn_patch_text_nosync(void *addr, u32 insn)
+{
+	WRITE_ONCE(*(u32 *)addr, insn);
+	__builtin___clear_cache((char *)addr, (char *)addr + sizeof(u32));
+	return 0;
+}
+
+void *aarch64_insn_set(void *dst, u32 insn, size_t len)
+{
+	u32 *p = dst;
+	size_t i;
+
+	for (i = 0; i < len / sizeof(u32); i++)
+		WRITE_ONCE(p[i], insn);
+	__builtin___clear_cache((char *)dst, (char *)dst + len);
+
+	return dst;
+}
