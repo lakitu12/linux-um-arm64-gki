@@ -110,6 +110,110 @@ extern unsigned long end_iomem;
 #define pmd_pfn(pmd) (pmd_val(pmd) >> PAGE_SHIFT)
 #define pmd_page(pmd) phys_to_page(pmd_val(pmd) & PAGE_MASK)
 
+/*
+ * CONFIG_HAVE_ARCH_TRANSPARENT_HUGEPAGE is selected only so that the page
+ * cache may use large folios: the filemap code gates mapping_set_large_folios()
+ * on CONFIG_TRANSPARENT_HUGEPAGE, and a large folio is what makes a run of
+ * guest file pages physically contiguous -- which is in turn the only way
+ * several guest pages can share one host VMA (see tlb.c).
+ *
+ * Anon THP is deliberately never used here: this page table stores guest
+ * physical addresses as software entries, there is no PMD-level huge mapping,
+ * and pmd_trans_huge() below says so.  The stub definitions exist because the
+ * generic THP code has to compile against them.
+ */
+#define HPAGE_SHIFT		PMD_SHIFT
+#define HPAGE_SIZE		(_AC(1, UL) << HPAGE_SHIFT)
+#define HPAGE_MASK		(~(HPAGE_SIZE - 1))
+#define HUGETLB_PAGE_ORDER	(HPAGE_SHIFT - PAGE_SHIFT)
+
+#define update_mmu_cache_pmd(vma, addr, pmd) do {} while (0)
+
+static inline int pmd_write(pmd_t pmd)
+{
+	return pmd_val(pmd) & _PAGE_RW;
+}
+
+static inline int pmd_trans_huge(pmd_t pmd)
+{
+	return 0;
+}
+
+static inline int pmd_devmap(pmd_t pmd)
+{
+	return 0;
+}
+
+static inline pmd_t pmd_mkold(pmd_t pmd)
+{
+	pmd_val(pmd) &= ~_PAGE_ACCESSED;
+	return pmd;
+}
+
+static inline pmd_t pmd_wrprotect(pmd_t pmd)
+{
+	pmd_val(pmd) &= ~_PAGE_RW;
+	return pmd;
+}
+
+static inline pmd_t pmd_mkwrite_novma(pmd_t pmd)
+{
+	pmd_val(pmd) |= _PAGE_RW;
+	return pmd;
+}
+
+static inline pmd_t pmd_mkdirty(pmd_t pmd)
+{
+	pmd_val(pmd) |= _PAGE_DIRTY;
+	return pmd;
+}
+
+static inline pmd_t pmd_mkhuge(pmd_t pmd)
+{
+	return pmd;
+}
+
+static inline pmd_t pmd_mkyoung(pmd_t pmd)
+{
+	pmd_val(pmd) |= _PAGE_ACCESSED;
+	return pmd;
+}
+
+static inline pmd_t pmd_mknotpresent(pmd_t pmd)
+{
+	pmd_val(pmd) &= ~_PAGE_PRESENT;
+	return pmd;
+}
+
+static inline pmd_t pmd_modify(pmd_t pmd, pgprot_t newprot)
+{
+	return pfn_pmd(pmd_pfn(pmd), newprot);
+}
+
+static inline pmd_t pmd_mkclean(pmd_t pmd)
+{
+	pmd_val(pmd) &= ~_PAGE_DIRTY;
+	return pmd;
+}
+
+static inline pmd_t pmd_mkinvalid(pmd_t pmd)
+{
+	pmd_val(pmd) &= ~_PAGE_PRESENT;
+	return pmd;
+}
+
+static inline pmd_t pmdp_establish(struct vm_area_struct *vma,
+				   unsigned long address, pmd_t *pmdp,
+				   pmd_t pmd)
+{
+	pmd_t old = *pmdp;
+
+	*pmdp = pmd;
+	return old;
+}
+
+#define set_pmd_at(mm, addr, pmdp, pmdval) set_pmd(pmdp, pmdval)
+
 #define pte_page(x) pfn_to_page(pte_pfn(x))
 
 #define pte_present(x)	pte_get_bits(x, (_PAGE_PRESENT | _PAGE_PROTNONE))

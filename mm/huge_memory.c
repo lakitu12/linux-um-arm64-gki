@@ -122,6 +122,17 @@ unsigned long __thp_vma_allowable_orders(struct vm_area_struct *vma,
 		supported_orders = THP_ORDERS_ALL_FILE_DEFAULT;
 
 	orders &= supported_orders;
+	/*
+	 * UML has no huge leaves: a pmd holds the address of the next level,
+	 * never a folio.  Every order below PMD_ORDER is fine there, because
+	 * multi-size THP installs them as a run of PTEs (set_ptes()), which is
+	 * exactly what those page tables want.  The PMD order itself is not:
+	 * letting it through makes do_huge_pmd_anonymous_page() store a huge
+	 * pmd, and every later pte_offset_map() reads that slot as a "bad pmd"
+	 * and clears the page table under the guest.  Measured 2026-11-11.
+	 */
+	if (IS_ENABLED(CONFIG_UML))
+		orders &= ~BIT(PMD_ORDER);
 	trace_android_vh_thp_vma_allowable_orders(vma, &orders);
 	if (!orders)
 		return 0;
@@ -792,8 +803,38 @@ static int __init hugepage_init_sysfs(struct kobject **hugepage_kobj)
 	 * disable all other sizes. powerpc's PMD_ORDER isn't a compile-time
 	 * constant so we have to do this here.
 	 */
-	if (!anon_orders_configured)
+	if (!anon_orders_configured) {
 		huge_anon_orders_inherit = BIT(PMD_ORDER);
+#ifdef CONFIG_UML
+		/*
+		 * UML: PMD-sized THP has nothing to stand on here.  This port's
+		 * pmd_t holds the guest physical address of a PTE page in a
+		 * software entry, not a host page-table entry that can carry a
+		 * huge-leaf bit, so pmd_trans_huge() is always false and every
+		 * generic THP path that assumes it can rewrite a pmd (mprotect,
+		 * NUMA balancing, khugepaged) would replace a page-table pointer
+		 * with something pmd_bad() rejects -- measured: pmd_modify() on
+		 * such an entry writes phys|PAGE_COPY and the next walk clears
+		 * the table, "Bad pmd" on freeing the address space.
+		 *
+		 * What this port does want is the multi-size, PTE-mapped half of
+		 * THP: an order-N folio is laid out contiguously in guest
+		 * physical memory, so N adjacent guest virtual pages end up with
+		 * N adjacent host mappings and map() can fold them into one host
+		 * VMA.  That matters because a guest page costs one host VMA and
+		 * the host's vm.max_map_count caps a guest process at ~256MB.
+		 *
+		 * So: enable every anon order below PMD_ORDER, leave PMD-sized
+		 * THP out of both "always" and "inherit" -- with the default
+		 * global policy (never/madvise) no VMA can then reach a PMD
+		 * fault, not even after madvise(MADV_HUGEPAGE).  An explicit
+		 * thp_anon= on the command line still overrides this.
+		 */
+		huge_anon_orders_always = (BIT(PMD_ORDER) - 1) &
+					  ~(BIT(0) | BIT(1));
+		huge_anon_orders_inherit = 0;
+#endif
+	}
 
 	*hugepage_kobj = kobject_create_and_add("transparent_hugepage", mm_kobj);
 	if (unlikely(!*hugepage_kobj)) {
@@ -2112,7 +2153,7 @@ bool madvise_free_huge_pmd(struct mmu_gather *tlb, struct vm_area_struct *vma,
 	spinlock_t *ptl;
 	pmd_t orig_pmd;
 	struct folio *folio;
-	struct mm_struct *mm = tlb->mm;
+	struct mm_struct *mm __maybe_unused = tlb->mm;
 	bool ret = false;
 
 	tlb_change_page_size(tlb, HPAGE_PMD_SIZE);
@@ -2358,7 +2399,7 @@ int change_huge_pmd(struct mmu_gather *tlb, struct vm_area_struct *vma,
 		    pmd_t *pmd, unsigned long addr, pgprot_t newprot,
 		    unsigned long cp_flags)
 {
-	struct mm_struct *mm = vma->vm_mm;
+	struct mm_struct *mm __maybe_unused = vma->vm_mm;
 	spinlock_t *ptl;
 	pmd_t oldpmd, entry;
 	bool prot_numa = cp_flags & MM_CP_PROT_NUMA;

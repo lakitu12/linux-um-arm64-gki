@@ -5368,9 +5368,22 @@ vm_fault_t do_set_pmd(struct vm_fault *vmf, struct folio *folio, struct page *pa
 	 * PMD mappings, but PTE-mapped THP are fine. So let's simply refuse any
 	 * PMD mappings if THPs are disabled. As we already have a THP,
 	 * behave as if we are forcing a collapse.
+	 *
+	 * UML joins s390 here, and for the same reason: its pmd_t is a software
+	 * entry that cannot express a huge leaf (pmd_trans_huge() is constant 0,
+	 * there is no _PAGE_PSE), so a PMD mapping laid down here would be read
+	 * back as a PTE-page pointer by every walker.  This path has to say so
+	 * itself: it asks "is THP disabled for this VMA", not "which orders are
+	 * enabled", and the per-size sysfs knob that keeps PMD_ORDER out of the
+	 * anonymous fault path does not reach it.  Measured: order-9 page-cache
+	 * folios from ext4 took this branch, and the next mprotect over the
+	 * range printed "bad pmd ...(0xee000c1)" (pfn_PAGE_COPY) and cleared the
+	 * page table.  PTE-mapped large folios, which is all UML wants from
+	 * THP, fall through to do_set_pte() and are unaffected.
 	 */
-	if (thp_disabled_by_hw() || vma_thp_disabled(vma, vma->vm_flags,
-						     /* forced_collapse=*/ true))
+	if (IS_ENABLED(CONFIG_UML) || thp_disabled_by_hw() ||
+	    vma_thp_disabled(vma, vma->vm_flags,
+			     /* forced_collapse=*/ true))
 		return ret;
 
 	if (!thp_vma_suitable_order(vma, haddr, PMD_ORDER))
