@@ -15,6 +15,7 @@
 #include <linux/threads.h>
 #include <linux/cpu.h>
 #include <linux/hardirq.h>
+#include <linux/irq_work.h>
 #include <linux/smp.h>
 #include <linux/smp-internal.h>
 #include <init.h>
@@ -27,6 +28,7 @@ enum {
 	UML_IPI_CALL_SINGLE,
 	UML_IPI_CALL,
 	UML_IPI_STOP,
+	UML_IPI_IRQ_WORK,
 };
 
 void arch_smp_send_reschedule(int cpu)
@@ -56,6 +58,20 @@ void smp_send_stop(void)
 			continue;
 		os_send_ipi(cpu, UML_IPI_STOP);
 	}
+}
+
+/*
+ * irq_work is raised from contexts that must not wait for the next tick: the
+ * bpf memory allocator refills its per-cpu caches from it, and a map update
+ * that runs out of a cache returns ENOMEM instead of blocking.  With no
+ * arch_irq_work_raise() the work would sit in the raised list until
+ * irq_work_tick(), which is 10ms away at HZ=100 -- long enough for the second
+ * update in a batch to fail.  A self-IPI runs it before the caller returns to
+ * user mode instead.
+ */
+void arch_irq_work_raise(void)
+{
+	os_send_ipi(raw_smp_processor_id(), UML_IPI_IRQ_WORK);
 }
 
 static void ipi_handler(int vector, struct uml_pt_regs *regs)
@@ -88,6 +104,10 @@ static void ipi_handler(int vector, struct uml_pt_regs *regs)
 		set_cpu_online(cpu, false);
 		while (1)
 			pause();
+		break;
+
+	case UML_IPI_IRQ_WORK:
+		irq_work_run();
 		break;
 
 	default:

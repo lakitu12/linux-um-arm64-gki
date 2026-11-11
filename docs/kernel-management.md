@@ -34,7 +34,7 @@ climbing into the cap.
 
 ## What the kernel must keep
 
-Four properties, each of which a rebase can silently drop:
+Five properties, each of which a rebase can silently drop:
 
 1. **Anon memory in PTE-mapped large folios.** The global THP policy is
    `never`; large folios arrive through the multi-size path, orders 2 through
@@ -57,6 +57,18 @@ Four properties, each of which a rebase can silently drop:
 4. **`arch/um/include/asm/pgtable.h` keeps the pmd stubs.** They exist so the
    generic THP code compiles; they describe a port with no PMD-level huge
    mappings. Do not "fix" them into real huge-leaf helpers.
+5. **`arch_irq_work_raise()` runs the work from an IPI.** Without it the port
+   falls back to the weak stub and the raised list is only drained from
+   `irq_work_tick()`, 10ms away at HZ=100. The bpf memory allocator refills
+   its per-cpu caches from irq_work and cannot wait: a `BPF_F_NO_PREALLOC`
+   hash map seeds a cache whose unit size exceeds 256 bytes with a single
+   element, so the second update in a batch finds the free list empty,
+   `bpf_mem_cache_alloc()` returns NULL and `htab_map_update_elem()` reports
+   ENOMEM. netd's `uid_permission_chunk_map` is exactly that shape (1024-byte
+   value, one element per update) and system_server died on its first boot at
+   every `ConnectivityService` init. With the IPI it is gone; `CONFIG_SMP`
+   only, and `arch_irq_work_has_interrupt()` reports the same condition so a
+   uniprocessor build keeps the tick path.
 
 ## The config choice trap
 
@@ -105,6 +117,12 @@ Before shipping, and again after a rebase or a config change:
   climbing and dies at the cap.
 - **No `bad pmd`.** It shows up on the guest console, and the next walk clears
   the page table under the running process.
+- **system_server survives its first boot.** A `nativeWriteToMapEntry failed:
+  ENOMEM` from `BpfNetMaps.setChunkPermListForUids`, followed by `FATAL
+  EXCEPTION IN SYSTEM PROCESS`, is the irq_work symptom above; a guest that
+  boots and reaches `ActivityManagerTiming: FinishBooting` with a single
+  system_server pid has it right. The retry succeeding on the second boot is
+  not the fix -- it means the tick eventually refilled the cache.
 
 A baseline that dies at 12-14 minutes makes 30 minutes with a flat VMA count
 and zero `bad pmd` meaningful; a run that ends because the task was removed
