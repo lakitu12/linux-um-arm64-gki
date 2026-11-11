@@ -109,7 +109,9 @@ surprising a device.
   the artifact on an arm64 runner. `pages4k`, `vt`, `virtiogpu`, `extra_config`
   and `run_boot` are dispatch inputs.
 - `docs/` — [`gki-notes.md`](docs/gki-notes.md) (maintenance and rebasing),
-  [`guest-features.md`](docs/guest-features.md), [`smp.md`](docs/smp.md), and
+  [`guest-features.md`](docs/guest-features.md),
+  [`kernel-management.md`](docs/kernel-management.md) (what a guest kernel
+  build has to keep, and how to check it), [`smp.md`](docs/smp.md), and
   [`upstream-port.md`](docs/upstream-port.md) (the port's own README, imported
   unchanged).
 
