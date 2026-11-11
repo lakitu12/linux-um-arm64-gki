@@ -300,7 +300,7 @@ static inline void set_ptes(struct mm_struct *mm, unsigned long addr,
 		if (--nr == 0)
 			break;
 		ptep++;
-		pte = __pte(pte_val(pte) + (nr << PFN_PTE_SHIFT));
+		pte = __pte(pte_val(pte) + PAGE_SIZE);
 	}
 
 	um_tlb_mark_sync(mm, addr, addr + length);
