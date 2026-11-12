@@ -5,6 +5,7 @@
 
 #include <linux/stddef.h>
 #include <linux/module.h>
+#include <linux/atomic.h>
 #include <linux/memblock.h>
 #include <linux/mm.h>
 #include <linux/swap.h>
@@ -260,3 +261,15 @@ void mark_rodata_ro(void)
 
 	os_protect_memory((void *)rodata_start, rodata_end - rodata_start, 1, 0, 0);
 }
+
+/*
+ * A folio reaching the buddy allocator while still mapped.
+ *
+ * This port maps one multi-size THP folio through several PTEs, so the
+ * per-page map accounting is where a mistake would hide -- and it hides
+ * silently: the page is handed out again while the process that owned it
+ * keeps writing to it, which surfaces much later as an object with a
+ * corrupted header in an unrelated process.  Reported from
+ * __free_pages_prepare() in mm/page_alloc.c; see the comment there.
+ */
+atomic64_t um_folio_free_mapped = ATOMIC64_INIT(0);

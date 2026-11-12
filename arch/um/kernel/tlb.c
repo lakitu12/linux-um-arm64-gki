@@ -56,6 +56,14 @@ void report_enomem(void)
  */
 static atomic64_t um_pte_sync_lost;
 static atomic64_t um_pte_sync_err;
+/*
+ * A present PTE whose page has no references left: the mapping outlived the
+ * page.  Nothing unmapped it, so the page is already back in the buddy
+ * allocator and will be handed to someone else while this process keeps
+ * using it -- the classic silent corruption, and the one thing a multi-size
+ * THP folio (one page, several PTEs) is most likely to get wrong.
+ */
+static atomic64_t um_pte_dangling;
 
 static inline int update_pte_range(pmd_t *pmd, unsigned long addr,
 				   unsigned long end,
@@ -84,6 +92,30 @@ again:
 			unsigned long phys = pte_val(val) & PAGE_MASK;
 			int fd = phys_mapping(phys, &offset);
 			int r, w, x, prot;
+
+			/*
+			 * Checked before the host mapping is built, because
+			 * after that the guest can reach the page and the
+			 * evidence is gone.  pfn_valid() first: a PTE can name
+			 * a physical address outside the memory this port was
+			 * given (harmless to skip), and pfn_to_page() on one
+			 * would read unrelated memory.
+			 */
+			if (pfn_valid(pte_pfn(val))) {
+				struct page *page = pte_page(val);
+				struct folio *folio = page_folio(page);
+
+				if (!folio_ref_count(folio)) {
+					atomic64_inc(&um_pte_dangling);
+					if (atomic64_read(&um_pte_dangling) < 20)
+						pr_err("um: pte %lx maps pfn %lx of a freed folio (order %u, mapcount %d, %lld so far)\n",
+						       addr,
+						       (unsigned long)pte_pfn(val),
+						       folio_order(folio),
+						       folio_mapcount(folio),
+						       (long long)atomic64_read(&um_pte_dangling));
+				}
+			}
 
 			r = pte_read(val);
 			w = pte_write(val);

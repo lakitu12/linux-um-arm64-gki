@@ -1511,6 +1511,33 @@ __always_inline bool __free_pages_prepare(struct page *page,
 
 	VM_BUG_ON_PAGE(PageTail(page), page);
 
+#ifdef CONFIG_UML
+	extern atomic64_t um_folio_free_mapped;
+
+	/*
+	 * UML: a folio that still has a mapping when it reaches the buddy
+	 * allocator is wrong page-table accounting somewhere, and the way it
+	 * shows up is not a fault here but corrupted bytes in whoever gets
+	 * the page next.  This port's multi-size THP support maps one folio
+	 * through several PTEs, which is exactly where that accounting can go
+	 * wrong silently: the freed page is handed out again while the
+	 * process that owned it keeps using it, because nothing unmapped it.
+	 *
+	 * DEBUG_VM is off in the guest config, so VM_BUG_ON would be a no-op
+	 * there; report with the numbers that identify the folio and count,
+	 * so a repeated hit does not flood the console.
+	 */
+	if (folio_mapcount(folio) != 0) {
+		atomic64_inc(&um_folio_free_mapped);
+		if (atomic64_read(&um_folio_free_mapped) < 20)
+			pr_err("um: freeing folio order %u (pfn %lx, %lu pages) with mapcount %d refcount %d (%lld so far)\n",
+			       folio_order(folio), (unsigned long)folio_pfn(folio),
+			       folio_nr_pages(folio), folio_mapcount(folio),
+			       folio_ref_count(folio),
+			       (long long)atomic64_read(&um_folio_free_mapped));
+	}
+#endif
+
 	trace_mm_page_free(page, order);
 	kmsan_free_page(page, order);
 
