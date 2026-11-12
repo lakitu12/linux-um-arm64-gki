@@ -117,6 +117,15 @@ stub_signal_interrupt(int sig, siginfo_t *info, void *p)
 	unsigned int futex_val;
 	long res;
 
+	/*
+	 * Some syscalls are cheap enough to answer right here and too frequent
+	 * to pay the handoff for; see stub_fast_syscall(). This has to run
+	 * before anything is published to the kernel, and it must not fall
+	 * through to the handoff when it succeeds.
+	 */
+	if (sig == SIGSYS && stub_fast_syscall(uc, info))
+		return;
+
 	d->signal = sig;
 	d->si_offset = (unsigned long)info - (unsigned long)&d->sigstack[0];
 	d->mctx_offset = (unsigned long)&uc->uc_mcontext - (unsigned long)&d->sigstack[0];

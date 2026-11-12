@@ -880,6 +880,19 @@ static irqreturn_t um_timer(int irq, void *dev)
 	return IRQ_HANDLED;
 }
 
+/*
+ * Host CLOCK_MONOTONIC (ns) at the moment the guest clock took its base.
+ *
+ * The guest clocksource is the host's CLOCK_MONOTONIC divided by
+ * TIMER_MULTIPLIER, so the guest's CLOCK_MONOTONIC is that host clock minus
+ * this value. The stub uses it to answer clock_gettime without trapping into
+ * the guest kernel; see struct stub_data_arch.
+ *
+ * Zero means "not calibrated"; time travel keeps its own clock, so there it
+ * stays zero forever and the stub falls back to the trap path.
+ */
+u64 um_mono_base_ns;
+
 static u64 timer_read(struct clocksource *cs)
 {
 	if (time_travel_mode != TT_MODE_OFF) {
@@ -901,7 +914,7 @@ static u64 timer_read(struct clocksource *cs)
 		return time_travel_time / TIMER_MULTIPLIER;
 	}
 
-	return os_nsecs() / TIMER_MULTIPLIER;
+	return (u64)os_nsecs() / TIMER_MULTIPLIER;
 }
 
 static struct clocksource timer_clocksource = {
@@ -948,6 +961,27 @@ static void __init um_timer_init(void)
 	if (err) {
 		printk(KERN_ERR "clocksource_register_hz returned %d\n", err);
 		return;
+	}
+
+	/*
+	 * The stub answers CLOCK_MONOTONIC itself as host_ns - um_mono_base_ns,
+	 * so the base has to be the host time that corresponds to guest
+	 * MONOTONIC zero -- not the host time at the moment this clocksource
+	 * was registered. The guest clock ran on the previous clocksource for
+	 * a while before the switch (measured: ~55ms), and that head start is
+	 * part of the guest's MONOTONIC.
+	 *
+	 * Sampling it in timer_read() looked right but was not: reading the
+	 * new clocksource is exactly what happens at the switch, so the lazy
+	 * sample always missed that head start, the stub answered every
+	 * CLOCK_MONOTONIC read ~55ms early, and the guest ran every
+	 * MONOTONIC-based timeout ~55ms long (cold boot got tens of seconds
+	 * slower).
+	 */
+	if (time_travel_mode == TT_MODE_OFF) {
+		u64 guest_now = ktime_get_mono_fast_ns();
+
+		um_mono_base_ns = (u64)os_nsecs() - guest_now;
 	}
 }
 

@@ -15,6 +15,8 @@
 #define STUB_MMAP_NR __NR_mmap
 /* Syscall the stub uses to restore guest TLS; see arch/um/kernel/skas/stub_exe.c */
 #define STUB_SECCOMP_TLS_SYSCALL __NR_arch_prctl
+/* No stub-side fast path on x86; keep the filter slot inert. */
+#define STUB_FAST_CLOCK_GETTIME (-1)
 #define MMAP_OFFSET(o) (o)
 
 #define __syscall_clobber "r11","rcx","memory"

@@ -28,6 +28,9 @@
 #include <registers.h>
 #include <skas.h>
 #include <sysdep/stub.h>
+
+/* Host CLOCK_MONOTONIC at the guest clock's base (kernel/time.c). */
+extern unsigned long long um_mono_base_ns;
 #include <stub-futex.h>
 #include <sysdep/mcontext.h>
 #include <linux/futex.h>
@@ -794,6 +797,13 @@ int start_userspace(struct mm_id *mm_id)
 			d->futex = FUTEX_IN_CHILD;
 			d->spin_ticks = have_stub_cycles ?
 				seccomp_spin_us * stub_cycles_per_us() : 0;
+			/*
+			 * Lets the stub answer clock_gettime(CLOCK_MONOTONIC)
+			 * itself instead of trapping into the guest kernel.
+			 * Zero (time travel, or the base not sampled yet)
+			 * makes the stub keep using the trap path.
+			 */
+			d->arch_data.mono_ns_off = um_mono_base_ns;
 		}
 	}
 

@@ -86,6 +86,12 @@ extern void time_travel_not_configured(void);
 extern unsigned long tt_extra_sched_jiffies;
 
 /*
+ * Host CLOCK_MONOTONIC (ns) when the guest clock took its base; zero while
+ * unset and under time travel, where the fast path must not be used.
+ */
+extern u64 um_mono_base_ns;
+
+/*
  * Without CONFIG_UML_TIME_TRAVEL_SUPPORT this is a linker error if used,
  * which is intentional since we really shouldn't link it in that case.
  */

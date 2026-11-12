@@ -30,6 +30,19 @@
  * anything, since no syscall number is -1.
  */
 #define STUB_SECCOMP_TLS_SYSCALL (-1)
+/*
+ * Answered in the stub instead of the guest kernel (stub_fast_syscall()).
+ * The seccomp filter permits it so the stub can make the host syscall;
+ * -1 keeps the slot inert on architectures that have no fast path.
+ */
+#define STUB_FAST_CLOCK_GETTIME __NR_clock_gettime
+/*
+ * clockid values are ABI, not policy; spelled out here so the stub does not
+ * have to pull in a header (or anything whose include order could collide with
+ * the freestanding environment it is built in).
+ */
+#define STUB_CLOCK_REALTIME 0
+#define STUB_CLOCK_MONOTONIC 1
 #define MMAP_OFFSET(o) (o)
 
 static __always_inline long stub_syscall0(long syscall)
@@ -319,6 +332,96 @@ stub_seccomp_restore_state(struct stub_data_arch *arch)
 		__asm__ volatile ("msr tpidr_el0, %0" :: "r" (arch->tls));
 
 	arch->sync = 0;
+}
+
+/*
+ * Answer a syscall in the stub instead of handing it to the guest kernel.
+ *
+ * Every guest syscall lands in this SIGSYS handler; the round trip that
+ * follows (stub -> futex -> guest kernel -> futex -> stub -> sigreturn) costs
+ * about 20us, while some of those calls can be answered by one host syscall
+ * from here. Only calls whose answer does not depend on guest kernel state
+ * belong here -- getpid/getuid/gettid must NOT be added, the guest's values
+ * differ from the host's.
+ *
+ * Returns true when the call was completed and the ucontext was updated; the
+ * caller must then return without touching the handoff machinery.
+ *
+ * clock_gettime is worth it on its own: it is ~35% of every syscall a
+ * cold-booting Android makes (measured with raw_syscalls tracing), and
+ * CLOCK_MONOTONIC dominates that share.
+ */
+static __always_inline int
+stub_fast_syscall(ucontext_t *uc, siginfo_t *info)
+{
+	mcontext_t *mc = &uc->uc_mcontext;
+	struct stub_data *d = get_stub_data();
+	struct timespec ts, *out;
+	unsigned long long ns;
+	long ret;
+
+	if (mc->regs[8] != __NR_clock_gettime)
+		return 0;
+
+	/*
+	 * The switch answers REALTIME and MONOTONIC only; every other
+	 * clockid (CPU-time, coarse, raw, dynamic) has its own bases or is
+	 * guest accounting and falls through to the trap path below.
+	 */
+	switch ((int)mc->regs[0]) {
+	case STUB_CLOCK_REALTIME:
+		/* Same epoch on both sides: answer with the host's value. */
+		ret = stub_syscall2(__NR_clock_gettime, STUB_CLOCK_REALTIME,
+				    (unsigned long)&ts);
+		if (!ret) {
+			out = (struct timespec *)mc->regs[1];
+			out->tv_sec = ts.tv_sec;
+			out->tv_nsec = ts.tv_nsec;
+			ret = 0;
+		}
+		break;
+	case STUB_CLOCK_MONOTONIC:
+		/*
+		 * The guest's clock is the host's minus the offset the
+		 * kernel sampled when the guest clock took its base. A zero
+		 * offset means "not sampled" (or time travel), so trap.
+		 */
+		if (!d->arch_data.mono_ns_off)
+			return 0;
+		ret = stub_syscall2(__NR_clock_gettime, STUB_CLOCK_MONOTONIC,
+				    (unsigned long)&ts);
+		if (ret)
+			break;
+		ns = (unsigned long long)ts.tv_sec * 1000000000ULL +
+		     (unsigned long long)ts.tv_nsec -
+		     d->arch_data.mono_ns_off;
+		out = (struct timespec *)mc->regs[1];
+		out->tv_sec = ns / 1000000000ULL;
+		out->tv_nsec = ns % 1000000000ULL;
+		ret = 0;
+		break;
+	default:
+		/*
+		 * CPU-time clocks are guest accounting, and the coarse/raw
+		 * variants have their own bases on both sides.
+		 */
+		return 0;
+	}
+
+	mc->regs[0] = (unsigned long)ret;
+	/*
+	 * No pc adjustment: the ucontext the seccomp trap produced already
+	 * points at the instruction after the svc, which is where the guest
+	 * must resume -- the same state the handoff path returns with.
+	 *
+	 * The TLS restore the handoff path does on the way out has to happen
+	 * here too: the kernel may have handed this slot a different guest
+	 * thread since the last trap, and without it the guest would resume
+	 * with the previous owner's thread pointer (measured symptom: every
+	 * process that calls clock_gettime dies with SIGSEGV).
+	 */
+	stub_seccomp_restore_state(&d->arch_data);
+	return 1;
 }
 
 /*

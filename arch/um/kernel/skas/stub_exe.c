@@ -368,15 +368,15 @@ noinline static void real_init(void)
 
 			/* [10-16] Check against permitted syscalls */
 			BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_futex,
-				 7, 0),
+				 8, 0),
 			BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K,__NR_recvmsg,
-				 6, 0),
+				 7, 0),
 			BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K,__NR_close,
-				 5, 0),
+				 6, 0),
 			BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, STUB_MMAP_NR,
-				 4, 0),
+				 5, 0),
 			BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_munmap,
-				 3, 0),
+				 4, 0),
 			/*
 			 * The syscall the stub needs in order to reinstate
 			 * guest TLS, which is architecture-specific:
@@ -389,14 +389,22 @@ noinline static void real_init(void)
 			 */
 			BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K,
 				 (unsigned int)STUB_SECCOMP_TLS_SYSCALL,
-				 2, 0),
+				 3, 0),
 			BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_rt_sigreturn,
+				 2, 0),
+			/*
+			 * Answered by the stub itself (stub_fast_syscall()):
+			 * has to be permitted here or the filter kills the
+			 * stub for making its own host syscall. arm64 only;
+			 * x86 keeps the slot inert the same way the TLS one is.
+			 */
+			BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, STUB_FAST_CLOCK_GETTIME,
 				 1, 0),
 
-			/* [17] Not one of the permitted syscalls */
+			/* [18] Not one of the permitted syscalls */
 			BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
 
-			/* [18] Permitted call for the stub */
+			/* [19] Permitted call for the stub */
 			BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
 		};
 		struct sock_fprog prog = {
