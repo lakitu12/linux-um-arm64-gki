@@ -579,7 +579,27 @@ static int shmem_confirm_swap(struct address_space *mapping, pgoff_t index,
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
 /* ifdef here to avoid bloating shmem.o when not necessary */
 
+#ifdef CONFIG_UML
+/*
+ * UML: a guest page costs a host VMA, and vm.max_map_count (65530 on the
+ * phones this port targets) then caps a guest process at roughly 256MB
+ * resident.  Large folios are the only way to break that 1:1 -- N contiguous
+ * guest physical pages become N adjacent host mappings that map() folds into
+ * one VMA -- and the page spaces that matter most here are not anonymous:
+ * ART's JIT cache is a memfd, so it is shmem.
+ *
+ * Measured on marble: with this default the guest's ShmemHugePages went 0 ->
+ * 172MB (ShmemPmdMapped staying 0 -- PTE-mapped folios, which is what this
+ * port can use), and the VMA count of the busiest guest process dropped from
+ * the 65530 cap to 38253 under the same start/stop workload.
+ *
+ * FORCE rather than ALWAYS because the shm mount's own superblock starts at
+ * NEVER, so ALWAYS would still leave these pages small.
+ */
+static int shmem_huge __read_mostly = SHMEM_HUGE_FORCE;
+#else
 static int shmem_huge __read_mostly = SHMEM_HUGE_NEVER;
+#endif
 static int tmpfs_huge __read_mostly = SHMEM_HUGE_NEVER;
 
 static unsigned int shmem_get_orders_within_size(struct inode *inode,
@@ -5537,10 +5557,28 @@ void __init shmem_init(void)
 #endif
 
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
+#ifdef CONFIG_UML
+	/*
+	 * FORCE is a "special" value the sysfs knob accepts (-- it is how this
+	 * port was measured), but this init path classifies anything not
+	 * greater than DENY as invalid and resets it to NEVER, which is
+	 * exactly what FORCE (-2) is.  Keep it: with FORCE,
+	 * shmem_huge_global_enabled() hands out the PMD order, and this port's
+	 * do_set_pmd() refuses to install a huge leaf (it has no such bit),
+	 * so the folio ends up PTE-mapped -- 512 adjacent PTEs backed by one
+	 * contiguous 2MB guest range, which is what lets the host fold them
+	 * into a single VMA.
+	 */
+	if (has_transparent_hugepage())
+		shmem_huge = SHMEM_HUGE_FORCE;
+	else
+		shmem_huge = SHMEM_HUGE_NEVER;
+#else
 	if (has_transparent_hugepage() && shmem_huge > SHMEM_HUGE_DENY)
 		SHMEM_SB(shm_mnt->mnt_sb)->huge = shmem_huge;
 	else
 		shmem_huge = SHMEM_HUGE_NEVER; /* just in case it was patched */
+#endif
 
 	/*
 	 * Default to setting PMD-sized THP to inherit the global setting and
