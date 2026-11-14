@@ -124,14 +124,17 @@ bad_wait:
 
 /*
  * How long each side may busy-poll the handoff word before parking, in
- * microseconds. The measured 22 us seccomp syscall round trip is mostly
- * handoff overhead around a few microseconds of actual work, so 10 us covers
- * the reply for the syscalls that matter while capping what a miss can burn
- * at roughly the cost of the futex sleep it tried to avoid. The hit-streak
- * accounting (see stub-futex.h) keeps an idle or compute-bound guest from
- * paying even that on every wait.
+ * microseconds. The default is the knee of the curve, not a guess: a guest
+ * issuing 400k syscalls (dd of one byte, read+write each) costs, per syscall,
+ * 43.7 us with polling off, 5.7 us at 10, 4.4 us at 60 and 4.4 us at 200 --
+ * measured on an 8-core phone with a 2-vCPU guest, one boot per setting, so
+ * the peer's reply latency has a long tail that 10 us covers only the head of.
+ * Beyond ~60 us the budget buys nothing: that is the peer's own wakeup cost,
+ * not something a longer spin can absorb. A miss is not free, which is why the
+ * hit-streak accounting (see stub-futex.h) stops the polling after a few
+ * consecutive misses and parks for a while instead.
  */
-#define SECCOMP_SPIN_DEFAULT_US 10
+#define SECCOMP_SPIN_DEFAULT_US 60
 
 static unsigned long seccomp_spin_us = SECCOMP_SPIN_DEFAULT_US;
 
@@ -158,7 +161,7 @@ __uml_setup("seccomp_spin=", uml_seccomp_spin_setup,
 "    (the constant-rate architected counter), not iterations, so it means\n"
 "    the same thing at every CPU frequency. An adaptive hit-streak stops\n"
 "    the polling when the peer keeps being slow. 0 disables polling.\n"
-"    Default: 10 (SECCOMP_SPIN_DEFAULT_US).\n\n");
+"    Default: 60 (SECCOMP_SPIN_DEFAULT_US).\n\n");
 
 /*
  * @slot names which of the mm's task slots this handoff belongs to: its

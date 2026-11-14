@@ -267,8 +267,8 @@ int main(int argc, char **argv)
 	sh->futex = OWN_ME;
 
 	printf("HANDOFF_START cntfrq=%lu Hz\n", cntfrq());
-	/* 10 us, the SECCOMP_SPIN_DEFAULT_US the kernel ships. */
-	spin_budget = cntfrq() / 100000;
+	/* 60 us, the SECCOMP_SPIN_DEFAULT_US the kernel ships. */
+	spin_budget = cntfrq() / 100000 * 60;
 
 	if (pin(4))
 		perror("pin cpu4 (continuing unpinned)");
